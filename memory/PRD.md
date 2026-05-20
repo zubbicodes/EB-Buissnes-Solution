@@ -15,16 +15,26 @@
 
 ## Core requirements (static)
 1. Upload bank CSV + invoice listing CSV with column mapping
-2. Auto-allocate using: (a) invoice ref regex in bank reference text, (b) fuzzy debtor-name fallback (WRatio≥80, corporate suffixes stripped) against combined ref+payer text
-3. Confidence per match: high (ref), medium (≥90 fuzzy), low (80–89 fuzzy), manual
-4. Manual override — drag-and-drop OR dialog
-5. CSV + Excel exports (xlsx with 2 sheets, £ formatting, colour-coded status)
-6. Multi-period compare (debtor × run matrix, consistently-unmatched alert)
-7. Debtor report with threshold flagging + CSV export
-8. CSV validation/diagnostics: errors block, warnings can be acknowledged
-9. Full audit trail (create / delete / manual link / create_run_failed)
-10. Multi-tenant secure: JWT auth, all data scoped to user
-11. Async processing for runs > 5000 rows (FastAPI BackgroundTasks + status polling)
+2. Auto-allocate using strict, finance-grade classification:
+   - Pass 1 — invoice ref regex in bank reference text (case/dash insensitive, suffix-digit fallback)
+   - Pass 2 — fuzzy debtor-name (WRatio with case-insensitive processor, threshold ≥70, corp suffix stripped)
+   - Pass 2.5 — token-substring fallback (≥2 distinctive ≥4-char debtor tokens in bank text); never promotes above PARTIAL
+3. **Strict FULL promotion rules** (only one needed):
+   - Rule A — pure invoice-reference match AND fully consumed
+   - Rule B — single debtor_name match (NOT debtor_tokens) at ≥95% AND exact amount AND unique candidate
+   - Rule C — invoice reference AND supporting debtor_name match ≥85% AND fully consumed (double-confirm)
+4. Everything else with any matches → PARTIAL (suggested allocation, requires review)
+5. **"Why matched?" reason field** on every bank row + per-match reason
+6. **Ambiguity flag** (`match.ambiguous = true` when multiple plausible invoices) + AlertTriangle UI icon
+7. Confidence: high/medium/low/manual
+8. Manual override — drag-and-drop OR dialog
+9. CSV + Excel exports (xlsx with 2 sheets, £ formatting, colour-coded status)
+10. Multi-period compare (debtor × run matrix, consistently-unmatched alert)
+11. Debtor report with threshold flagging + CSV export
+12. CSV validation/diagnostics: errors block, warnings can be acknowledged
+13. Full audit trail (create / delete / manual link / create_run_failed)
+14. Multi-tenant secure: JWT auth (Bearer + localStorage primary, cookies fallback), all data scoped to user
+15. Async processing for runs > 5000 rows (FastAPI BackgroundTasks + status polling)
 
 ## Implemented
 - [x] Landing page (green/blue branded, "Receivables Reconciliation Platform" everywhere)
