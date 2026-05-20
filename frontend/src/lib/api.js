@@ -30,6 +30,25 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
+// On 401 from any non-auth endpoint, clear the stale token so AuthContext can react.
+// We DO NOT redirect here — React Router handles that via Protected when user becomes false.
+api.interceptors.response.use(
+  (r) => r,
+  (error) => {
+    const url = error?.config?.url || "";
+    const status = error?.response?.status;
+    const isAuthEndpoint = /\/auth\/(login|register|refresh|me|logout)/.test(url);
+    if (status === 401 && !isAuthEndpoint) {
+      setToken("");
+      // soft signal to React: dispatch a custom event AuthContext will listen for.
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("ebrr:logout"));
+      }
+    }
+    return Promise.reject(error);
+  }
+);
+
 export function formatError(err) {
   const d = err?.response?.data?.detail;
   if (d == null) return err?.message || "Something went wrong";

@@ -24,6 +24,13 @@ export function AuthProvider({ children }) {
 
   useEffect(() => { refresh(); }, [refresh]);
 
+  // Global 401 → soft logout (Protected will redirect to /signin via React Router).
+  useEffect(() => {
+    const onLogout = () => setUser(false);
+    window.addEventListener("ebrr:logout", onLogout);
+    return () => window.removeEventListener("ebrr:logout", onLogout);
+  }, []);
+
   const login = async (email, password) => {
     setError("");
     try {
