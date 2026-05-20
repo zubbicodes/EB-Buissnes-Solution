@@ -569,6 +569,7 @@ async def _process_run_async(run_id: str, user_id: str, bank_csv: str, invoice_c
             {"id": run_id, "user_id": user_id},
             {"$set": {"status": "error", "error": str(e)}},
         )
+        await write_audit(user_id, run_id, "create_run_failed", {"error": str(e)})
 
 
 @api.post("/allocations")
