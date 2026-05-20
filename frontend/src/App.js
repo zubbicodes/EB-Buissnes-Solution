@@ -48,6 +48,7 @@ export default function App() {
           <Route element={<Protected />}>
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/new" element={<NewAllocation />} />
+            <Route path="/allocations/new" element={<NewAllocation />} />
             <Route path="/allocations/:id" element={<AllocationDetail />} />
             <Route path="/compare" element={<Compare />} />
             <Route path="/debtors" element={<Debtors />} />
