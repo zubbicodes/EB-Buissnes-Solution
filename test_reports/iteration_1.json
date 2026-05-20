@@ -1,0 +1,33 @@
+{
+  "summary": "Backend 13/13 pytest tests passed (auth, validate, create, list isolation, get, export CSV, manual-link, compare, debtors, audit, logout, delete). Frontend landing/signup/dashboard/compare/debtors/audit render with correct EB brand. Found CRITICAL frontend routing bug: /allocations/new resolves to AllocationDetail showing 'Run not found' instead of the 4-step wizard.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Router (App.js)", "issue": "Navigating to /allocations/new shows 'Run not found' toast and loads AllocationDetail. The dynamic /allocations/:id route is matching before /allocations/new, so the New Allocation wizard is unreachable from sidebar 'New Allocation' link / 'New allocation' button.", "selector": "/allocations/new", "priority": "CRITICAL"}
+    ],
+    "integration_issues": [
+      {"flow": "New Allocation Wizard", "issue": "Wizard cannot be opened via /allocations/new route; users cannot create runs through the UI (backend POST /api/allocations works fine via API). Sample-data button never rendered.", "affected_selectors": ["button:has-text('Sample data')", "wizard step indicators"]}
+    ],
+    "design_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/test_backend.py", "/app/test_reports/pytest/results.xml"],
+  "action_items": [
+    "Fix React route ordering in /app/frontend/src/App.js — declare <Route path='/allocations/new'> BEFORE <Route path='/allocations/:id'>, or use a non-conflicting path like /new-allocation. Currently 'new' is interpreted as run_id by AllocationDetail, causing API GET /api/allocations/new -> 404 'Run not found'.",
+    "After fix, retest full wizard flow (sample data -> validate -> run), AllocationDetail tabs, Manual Link dialog, Compare matrix render with 2 runs, Debtor threshold flagged banner, Audit filter by run id."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 786 lines — acceptable but starting to grow; consider splitting auth/allocations/reports into routers.",
+    "set_auth_cookies uses secure=False — fine for preview but must be True in production (behind HTTPS).",
+    "No refresh-token endpoint exists despite refresh_token cookie being issued; access token (12h) expiry will force re-login.",
+    "validate_csvs warnings block create unless proceed_with_warnings=True — UX should clearly show this in wizard.",
+    "Debtor 'flagged' only true when threshold>0; threshold=0 yields all flagged=false (intended but document)."
+  ],
+  "updated_files": ["/app/backend/tests/test_backend.py"],
+  "success_rate": {"backend": "100%", "frontend": "70%"},
+  "test_credentials": "admin@ebbusiness.com / Admin@2026! (verified login). Auto-created test users via /api/auth/register.",
+  "seed_data_creation": "Two ephemeral users created per test run; one allocation run created and deleted by tests.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend is solid (all CRUD + matching + isolation + audit verified by pytest at /app/backend/tests/test_backend.py). Focus next iteration on frontend wizard once route ordering is fixed — verify 4 steps, sample data autofill, header auto-detect, validate response render, run submit; then AllocationDetail tabs (Full/Partial/Unmatched Bank/Unmatched Invoice/Audit Log), Export CSV download, Manual Link dialog from Unmatched tabs; Compare 2-run matrix badges; Debtor threshold flagged banner + expand rows + CSV export; Audit page run_id filter.",
+  "rca of the issue": "Frontend route /allocations/new is consumed by the dynamic route /allocations/:id (in React Router v6, both static and dynamic siblings should coexist with static taking precedence, but if /allocations/:id is declared FIRST or the wizard route is missing/misnamed, /new is treated as an id). Fix: ensure App.js declares the static '/allocations/new' Route before '/allocations/:id', or rename the wizard route. Symptom reproduced live: red toast 'Run not found' and AllocationDetail loading skeleton at /allocations/new."
+}
