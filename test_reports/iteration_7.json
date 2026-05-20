@@ -1,0 +1,46 @@
+{
+  "summary": "Verified the critical sign-in redirect-loop bug fix. Frontend sign-in with admin@ebbusiness.com / Admin@2026! now lands on /dashboard and stays there (no bounce to /signin). Backend regression tests on /api/auth/refresh + cookie TTLs all pass.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_auth_refresh.py",
+    "/app/test_reports/pytest/auth_refresh.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "api.js is now 22 lines with no axios response interceptor — confirmed. This is the correct minimal fix; window.location.href redirects from interceptors are an anti-pattern for SPAs (causes loops, races with React Router). AuthContext should remain the single source of truth for redirects.",
+    "Cookies are set with secure=False in backend/server.py:54-55. This is acceptable for the current Emergent preview env (HTTP/HTTPS terminated at ingress), but for production deployment behind HTTPS, switch to secure=True and samesite='none' if cross-site, or keep 'lax' if same-site.",
+    "Optional follow-up (not blocking): if a token-refresh interceptor is needed in future, implement it WITHOUT window.location.href — instead, queue failed requests, call /api/auth/refresh, then retry. Use AuthContext to clear user state and let React Router handle redirect via <Navigate>.",
+    "test_credentials.md is outdated — still says 'access_token 12h, refresh_token 7d' but actual TTLs are now 7d/30d. Suggest the main agent update /app/memory/test_credentials.md to keep docs in sync."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_auth_refresh.py (new file — 4 regression tests)"
+  ],
+  "success_rate": {"backend": "100% (4/4 new auth tests)", "frontend": "100% (sign-in lands on /dashboard, persists across reload)"},
+  "test_credentials": "admin@ebbusiness.com / Admin@2026! (worked)",
+  "seed_data_creation": "None — used existing admin only.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Sign-in bug fix verified end-to-end on 2026-05-20. Verification steps: (1) backend pytest backend/tests/test_auth_refresh.py — all 4 pass (login Set-Cookie carries Max-Age=604800 access + Max-Age=2592000 refresh; /api/auth/refresh with refresh cookie returns user+new cookies; /api/auth/refresh without cookie returns 401; /auth/me works). (2) Playwright: cleared cookies, navigated to /signin, filled signin-email + signin-password testids, clicked signin-submit — URL changed to /dashboard within 1s, stayed for 6+ seconds, page reload also stays on /dashboard. data-testid='dashboard-page' visible. access_token (~604793s remaining) and refresh_token (~2591993s remaining) cookies both set with httpOnly=true, sameSite=lax. To run backend tests: REACT_APP_BACKEND_URL must be exported (use frontend/.env value) — pytest needs it.",
+  "verification_details": {
+    "signin_flow": {
+      "initial_url": "https://bank-reconcile-37.preview.emergentagent.com/signin",
+      "post_submit_url": "https://bank-reconcile-37.preview.emergentagent.com/dashboard",
+      "url_after_6s_wait": "https://bank-reconcile-37.preview.emergentagent.com/dashboard",
+      "url_after_reload": "https://bank-reconcile-37.preview.emergentagent.com/dashboard",
+      "no_redirect_loop": true,
+      "dashboard_testid_visible": true
+    },
+    "cookies_post_login": {
+      "access_token": {"present": true, "httpOnly": true, "sameSite": "Lax", "expires_in_seconds_approx": 604793, "matches_7d": true},
+      "refresh_token": {"present": true, "httpOnly": true, "sameSite": "Lax", "expires_in_seconds_approx": 2591993, "matches_30d": true}
+    },
+    "backend_pytest": {
+      "test_login_sets_cookies_with_expected_ttls": "PASSED (Max-Age=604800 + Max-Age=2592000 in Set-Cookie headers)",
+      "test_refresh_endpoint_with_valid_cookie_returns_user_and_new_cookies": "PASSED",
+      "test_refresh_endpoint_without_cookie_returns_401": "PASSED (detail='No refresh token')",
+      "test_me_works_with_login_cookies": "PASSED"
+    },
+    "api_js_audit": "22 lines, exports axios.create({baseURL, withCredentials:true}) + formatError + fmtGBP. No interceptors. Confirmed."
+  }
+}
