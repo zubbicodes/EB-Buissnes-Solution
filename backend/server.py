@@ -286,6 +286,13 @@ CORP_SUFFIXES = {
     "corp", "corporation", "gmbh", "sa", "ag", "bv", "nv", "srl", "spa", "llp", "lp", "kg",
 }
 
+def fmt_money(v: float) -> str:
+    try:
+        return f"£{float(v):,.2f}"
+    except (TypeError, ValueError):
+        return str(v)
+
+
 def strip_corp_suffix(s: str) -> str:
     """Remove generic corporate suffix tokens for tighter fuzzy comparison."""
     if not s:
@@ -345,7 +352,7 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
         if inv["number_norm"]:
             inv_by_norm.setdefault(inv["number_norm"], []).append(inv)
 
-    # Pass 1: invoice reference match
+    # Pass 1: invoice reference match (FULL-class candidate when fully consumed by reference matches)
     for b in bank_rows:
         if b["remaining"] <= 0:
             continue
@@ -386,11 +393,14 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
                 "amount": alloc,
                 "method": "reference",
                 "confidence": "high",
+                "reason": f"Invoice reference '{inv['number']}' found in bank text",
             }
             b["matches"].append(link)
             inv["matches"].append(link)
 
-    # Pass 2: fuzzy debtor name fallback — compare debtor against bank reference text + payer.
+    # Pass 2: fuzzy debtor name suggestion — compare debtor against bank reference text + payer.
+    # Threshold lowered to 70 so we catch suggested-but-uncertain matches as PARTIAL.
+    # Track candidate count to detect ambiguity (multiple plausible invoices for one bank row).
     for b in bank_rows:
         if b["remaining"] <= 0:
             continue
@@ -406,9 +416,10 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
             if not debtor_clean:
                 continue
             score = fuzz.WRatio(compare_text_clean, debtor_clean)
-            if score >= 80:
+            if score >= 70:
                 scored.append((score, inv))
         scored.sort(key=lambda x: (-x[0], -x[1]["remaining"]))
+        plausible_count = len(scored)
         for score, inv in scored:
             if b["remaining"] <= 0:
                 break
@@ -417,29 +428,83 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
                 continue
             b["remaining"] = round(b["remaining"] - alloc, 2)
             inv["remaining"] = round(inv["remaining"] - alloc, 2)
-            confidence = "medium" if score >= 90 else "low"
+            confidence = "high" if score >= 95 else "medium" if score >= 85 else "low"
             link = {
                 "bank_id": b["id"],
                 "invoice_id": inv["id"],
                 "amount": alloc,
                 "method": "debtor_name",
                 "confidence": confidence,
-                "score": score,
+                "score": round(score, 1),
+                "ambiguous": plausible_count > 1,
+                "reason": f"Debtor name similarity {round(score, 1)}%"
+                          + (f" — {plausible_count} plausible candidates" if plausible_count > 1 else " — unique candidate"),
             }
             b["matches"].append(link)
             inv["matches"].append(link)
 
-    # Assign statuses
+    # ---- Final classification (finance-grade strict rules) ----
+    # FULL only when:
+    #   Rule A — All matches are by invoice reference AND bank row is fully consumed
+    #   OR Rule B — Single debtor-name match with score >= 95 AND exact amount match AND no other plausible invoice
+    # Everything else with any matches => PARTIAL (suggested allocation, requires review)
+    # No matches => UNMATCHED
     for b in bank_rows:
-        if not b["matches"]:
+        ms = b["matches"]
+        if not ms:
             b["status"] = "unmatched"
             b["confidence"] = None
-        elif b["remaining"] <= 0.005:
+            b["reason"] = "No invoice reference detected and no debtor-name match above threshold"
+            continue
+
+        ref_methods = [m for m in ms if m["method"] == "reference"]
+        debtor_methods = [m for m in ms if m["method"] == "debtor_name"]
+        fully_consumed = b["remaining"] <= 0.005
+
+        # Rule A: pure reference match, fully consumed
+        rule_a = bool(ref_methods) and not debtor_methods and fully_consumed
+        # Rule B: single debtor match with very high confidence + exact amount + unique candidate
+        rule_b = (
+            len(ms) == 1
+            and not ref_methods
+            and debtor_methods
+            and debtor_methods[0].get("score", 0) >= 95
+            and debtor_methods[0].get("ambiguous") is False
+            and fully_consumed
+        )
+
+        if rule_a or rule_b:
             b["status"] = "full"
-            b["confidence"] = max((m["confidence"] for m in b["matches"]), key=lambda c: {"high": 3, "medium": 2, "low": 1}.get(c, 0))
+            reason_parts = []
+            if rule_a:
+                refs = ", ".join(m["reason"].split("'")[1] for m in ref_methods if "'" in m.get("reason", ""))
+                reason_parts.append(f"Invoice reference{'s' if len(ref_methods) > 1 else ''} {refs} matched and exact amount consumed")
+            if rule_b:
+                m = debtor_methods[0]
+                reason_parts.append(f"Unique debtor match at {m['score']}% with exact amount")
+            b["reason"] = " · ".join(reason_parts)
+            b["confidence"] = "high"
         else:
             b["status"] = "partial"
-            b["confidence"] = max((m["confidence"] for m in b["matches"]), key=lambda c: {"high": 3, "medium": 2, "low": 1}.get(c, 0))
+            # Highest confidence among matches, capped to "medium" unless reference-based
+            conf_order = {"high": 3, "medium": 2, "low": 1}
+            best = max((m["confidence"] for m in ms), key=lambda c: conf_order.get(c, 0))
+            if not ref_methods and best == "high":
+                # Demote debtor-only matches with score 95+ but ambiguous or partial-amount
+                best = "medium"
+            b["confidence"] = best
+            ambiguous = any(m.get("ambiguous") for m in debtor_methods)
+            bits = []
+            if ref_methods and not fully_consumed:
+                bits.append(f"Reference match but {fmt_money(b['remaining'])} unallocated")
+            if debtor_methods:
+                m_best = max(debtor_methods, key=lambda x: x.get("score", 0))
+                bits.append(f"Debtor name similarity {m_best.get('score', '?')}%")
+                if ambiguous:
+                    bits.append("multiple candidates — needs review")
+            if not ref_methods and not debtor_methods:
+                bits.append("partial reference allocation")
+            b["reason"] = "; ".join(bits) or "Requires review"
 
     for inv in invoice_rows:
         if not inv["matches"]:

@@ -5,8 +5,8 @@ import { toast } from "sonner";
 import { ArrowLeft, Download, Link2, GripVertical, AlertTriangle, FileSpreadsheet } from "lucide-react";
 
 const TABS = [
-  { id: "full", label: "Full Match" },
-  { id: "partial", label: "Partial" },
+  { id: "full", label: "Confirmed" },
+  { id: "partial", label: "Suggested" },
   { id: "unmatched_bank", label: "Unmatched Bank" },
   { id: "unmatched_invoice", label: "Unmatched Invoice" },
   { id: "audit", label: "Audit Log" },
@@ -143,8 +143,8 @@ export default function AllocationDetail() {
 
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-8">
         <Stat label="Total allocated" value={fmtGBP(run.stats.total_allocated)} tone="emerald" testid="stat-total" />
-        <Stat label="Fully matched" value={run.stats.fully_matched} tone="emerald" testid="stat-full" />
-        <Stat label="Partially matched" value={run.stats.partially_matched} tone="amber" testid="stat-partial" />
+        <Stat label="Confirmed" value={run.stats.fully_matched} tone="emerald" testid="stat-full" />
+        <Stat label="Suggested (review)" value={run.stats.partially_matched} tone="amber" testid="stat-partial" />
         <Stat label="Unmatched bank" value={run.stats.unmatched_bank} tone="rose" testid="stat-unmatched-bank" />
         <Stat label="Unmatched invoices" value={run.stats.unmatched_invoices} tone="rose" testid="stat-unmatched-invoice" />
       </div>
@@ -212,15 +212,17 @@ function BankTable({ rows, invById, showLink, onLink }) {
           <tr>
             <Th>Date</Th><Th>Reference</Th><Th>Payer</Th>
             <Th right>Amount</Th><Th right>Allocated</Th><Th right>Remaining</Th>
-            <Th>Matched Invoices</Th><Th>Conf.</Th>
+            <Th>Matched Invoices</Th><Th>Why matched?</Th><Th>Conf.</Th>
             {showLink && <Th />}
           </tr>
         </thead>
         <tbody>
           {rows.map((b) => {
             const allocated = b.matches.reduce((s, m) => s + m.amount, 0);
+            const hasAmbiguous = b.matches.some((m) => m.ambiguous);
+            const lowConfPartial = b.status === "partial" && b.confidence === "low";
             return (
-              <tr key={b.id} className="border-t border-slate-100 hover:bg-slate-50/60">
+              <tr key={b.id} className="border-t border-slate-100 hover:bg-slate-50/60 align-top">
                 <td className="px-3 py-2 text-slate-500">{b.date || "—"}</td>
                 <td className="px-3 py-2 font-mono text-xs">{b.reference || "—"}</td>
                 <td className="px-3 py-2">{b.payer || "—"}</td>
@@ -232,9 +234,17 @@ function BankTable({ rows, invById, showLink, onLink }) {
                     b.matches.map((m, i) => (
                       <div key={i} className="text-slate-700">
                         <span className="font-semibold">{invById[m.invoice_id]?.number || "?"}</span>
-                        <span className="text-slate-400"> · {fmtGBP(m.amount)} · {m.method}</span>
+                        <span className="text-slate-400"> · {fmtGBP(m.amount)} · {m.method}{m.score ? ` ${m.score}%` : ""}</span>
                       </div>
                     ))}
+                </td>
+                <td className="px-3 py-2 text-xs text-slate-600 max-w-xs">
+                  <div className="flex items-start gap-1">
+                    {(hasAmbiguous || lowConfPartial) && (
+                      <AlertTriangle className="h-3.5 w-3.5 text-amber-600 mt-0.5 shrink-0" />
+                    )}
+                    <span>{b.reason || "—"}</span>
+                  </div>
                 </td>
                 <td className="px-3 py-2">
                   {b.confidence && (

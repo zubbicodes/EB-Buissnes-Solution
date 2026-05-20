@@ -44,8 +44,8 @@ export default function Dashboard() {
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
         <Stat icon={FileText} colour="text-blue-700 bg-blue-50" label="Total allocated" value={fmtGBP(totals.allocated)} testid="stat-allocated" />
-        <Stat icon={CheckCircle2} colour="text-emerald-700 bg-emerald-50" label="Fully matched" value={totals.full} testid="stat-full" />
-        <Stat icon={AlertTriangle} colour="text-amber-700 bg-amber-50" label="Partially matched" value={totals.partial} testid="stat-partial" />
+        <Stat icon={CheckCircle2} colour="text-emerald-700 bg-emerald-50" label="Confirmed matches" value={totals.full} testid="stat-full" />
+        <Stat icon={AlertTriangle} colour="text-amber-700 bg-amber-50" label="Suggested (review)" value={totals.partial} testid="stat-partial" />
         <Stat icon={XCircle} colour="text-rose-700 bg-rose-50" label="Unmatched bank" value={totals.unmatched} testid="stat-unmatched" />
       </div>
 
