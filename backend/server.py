@@ -20,7 +20,7 @@ from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr
-from rapidfuzz import fuzz
+from rapidfuzz import fuzz, utils as rf_utils
 
 
 # ----- DB / Config -----
@@ -286,6 +286,18 @@ CORP_SUFFIXES = {
     "corp", "corporation", "gmbh", "sa", "ag", "bv", "nv", "srl", "spa", "llp", "lp", "kg",
 }
 
+STOP_TOKENS = {"the", "and", "of", "for", "to", "from", "payment", "transfer",
+               "bacs", "chq", "ref", "inv", "invoice", "kref", "receipt", "deposit"}
+
+
+def distinctive_tokens(s: str) -> List[str]:
+    """Tokens of a debtor name that are useful for substring matching: >=4 chars, not corp suffix, not stop word."""
+    if not s:
+        return []
+    return [t.lower() for t in re.findall(r"[A-Za-z0-9]+", s)
+            if len(t) >= 4 and t.lower() not in CORP_SUFFIXES and t.lower() not in STOP_TOKENS]
+
+
 def fmt_money(v: float) -> str:
     try:
         return f"£{float(v):,.2f}"
@@ -415,7 +427,7 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
             debtor_clean = strip_corp_suffix(inv["debtor"])
             if not debtor_clean:
                 continue
-            score = fuzz.WRatio(compare_text_clean, debtor_clean)
+            score = fuzz.WRatio(compare_text_clean, debtor_clean, processor=rf_utils.default_process)
             if score >= 70:
                 scored.append((score, inv))
         scored.sort(key=lambda x: (-x[0], -x[1]["remaining"]))
@@ -443,12 +455,57 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
             b["matches"].append(link)
             inv["matches"].append(link)
 
+    # Pass 2.5: token-substring fallback for noisy bank text.
+    # If at least 2 distinctive (>=4-char) tokens of an invoice debtor appear verbatim in the
+    # bank text, surface this as a SUGGESTED (PARTIAL) match. Never promotes to FULL.
+    for b in bank_rows:
+        if b["remaining"] <= 0:
+            continue
+        bank_text_lc = " ".join([t for t in [b.get("reference") or "", b.get("payer") or ""] if t]).lower()
+        if not bank_text_lc:
+            continue
+        # Skip if Pass 2 already linked anything via debtor_name to this bank row
+        if any(m["method"] == "debtor_name" for m in b["matches"]):
+            continue
+        scored = []
+        for inv in invoice_rows:
+            if inv["remaining"] <= 0 or not inv["debtor"]:
+                continue
+            # don't re-link if already linked via reference
+            if any(m["invoice_id"] == inv["id"] for m in b["matches"]):
+                continue
+            toks = distinctive_tokens(inv["debtor"])
+            if len(toks) < 2:
+                continue
+            hits = sum(1 for t in toks if t in bank_text_lc)
+            if hits >= 2:
+                score = fuzz.partial_token_set_ratio(bank_text_lc, inv["debtor"].lower())
+                scored.append((score, hits, len(toks), inv))
+        scored.sort(key=lambda x: (-x[1], -x[0], -x[3]["remaining"]))
+        plausible_count = len(scored)
+        for score, hits, total_toks, inv in scored:
+            if b["remaining"] <= 0:
+                break
+            alloc = round(min(b["remaining"], inv["remaining"]), 2)
+            if alloc <= 0:
+                continue
+            b["remaining"] = round(b["remaining"] - alloc, 2)
+            inv["remaining"] = round(inv["remaining"] - alloc, 2)
+            link = {
+                "bank_id": b["id"],
+                "invoice_id": inv["id"],
+                "amount": alloc,
+                "method": "debtor_tokens",
+                "confidence": "low",  # token-substring matches never reach high confidence
+                "score": round(score, 1),
+                "ambiguous": plausible_count > 1,
+                "reason": f"{hits}/{total_toks} distinctive debtor tokens found in bank text"
+                          + (f" — {plausible_count} plausible candidates" if plausible_count > 1 else ""),
+            }
+            b["matches"].append(link)
+            inv["matches"].append(link)
+
     # ---- Final classification (finance-grade strict rules) ----
-    # FULL only when:
-    #   Rule A — All matches are by invoice reference AND bank row is fully consumed
-    #   OR Rule B — Single debtor-name match with score >= 95 AND exact amount match AND no other plausible invoice
-    # Everything else with any matches => PARTIAL (suggested allocation, requires review)
-    # No matches => UNMATCHED
     for b in bank_rows:
         ms = b["matches"]
         if not ms:
@@ -458,7 +515,7 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
             continue
 
         ref_methods = [m for m in ms if m["method"] == "reference"]
-        debtor_methods = [m for m in ms if m["method"] == "debtor_name"]
+        debtor_methods = [m for m in ms if m["method"] in ("debtor_name", "debtor_tokens")]
         fully_consumed = b["remaining"] <= 0.005
 
         # Rule A: pure reference match, fully consumed
@@ -472,8 +529,16 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
             and debtor_methods[0].get("ambiguous") is False
             and fully_consumed
         )
+        # Rule C: reference match + supporting debtor match (>=85) + fully consumed
+        # The double-confirm is even stronger evidence than a pure reference match alone.
+        rule_c = (
+            bool(ref_methods)
+            and debtor_methods
+            and fully_consumed
+            and max((m.get("score", 0) for m in debtor_methods), default=0) >= 85
+        )
 
-        if rule_a or rule_b:
+        if rule_a or rule_b or rule_c:
             b["status"] = "full"
             reason_parts = []
             if rule_a:
@@ -482,6 +547,10 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
             if rule_b:
                 m = debtor_methods[0]
                 reason_parts.append(f"Unique debtor match at {m['score']}% with exact amount")
+            if rule_c and not rule_a:
+                best_d = max(debtor_methods, key=lambda x: x.get("score", 0))
+                refs = ", ".join(m["reason"].split("'")[1] for m in ref_methods if "'" in m.get("reason", ""))
+                reason_parts.append(f"Reference {refs} confirmed by debtor name ({best_d['score']}%) and exact amount")
             b["reason"] = " · ".join(reason_parts)
             b["confidence"] = "high"
         else:
