@@ -35,6 +35,9 @@
   - [x] Click-to-upload, sample data, paste textarea, Clear button
   - [x] Row preview table (first 4 data rows)
   - [x] Debounced auto-detect of headers on CSV change (400 ms)
+  - [x] **Robust auto-detect: 3-pass normalized matcher (lowercase + strip punctuation) with 60+ real-world finance synonyms — recognises 'Ref', 'Balance', 'Narrative', 'Name:', etc. without manual mapping**
+  - [x] Visual indicators: green/red dots on each field + "X/N required mapped" counter per group
+  - [x] BOM-prefixed Excel exports parse cleanly
   - [x] Mapping for: bank_date, reference_text, payer, amount, bank_account, transaction_type / invoice_number, debtor_name, invoice_date, amount, outstanding, due_date, customer_reference
 - [x] CSV validation diagnostics: errors (block), warnings (acknowledge), coverage bars, invalid-date warnings, missing-debtor warnings, duplicate invoice warnings, negative-amount warnings
 - [x] Matching engine: invoice ref regex (case/dash insensitive) + suffix-digit match → rapidfuzz WRatio≥80 with corporate-suffix stripping against `reference_text + payer` combined

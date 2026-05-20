@@ -74,7 +74,7 @@ export default function NewAllocation() {
         // Bank
         bank_date: prev.bank_date || guess(bh, ["transactiondate", "valuedate", "postingdate", "posteddate", "trandate", "txndate", "date"]),
         bank_reference: prev.bank_reference || guess(bh, ["referencetext", "transactionreference", "paymentreference", "reference", "ref", "details", "description", "narrative", "narration", "memo", "particulars", "notes"]),
-        bank_payer: prev.bank_payer || guess(bh, ["payer", "counterparty", "remitter", "sender", "fromparty", "originator", "name", "party", "from"]),
+        bank_payer: prev.bank_payer || guess(bh, ["payer", "counterparty", "remitter", "sender", "fromparty", "originator", "narrative", "narration", "description", "details", "memo", "name", "party", "from"]),
         bank_amount: prev.bank_amount || guess(bh, ["amount", "moneyin", "credit", "deposit", "value", "net", "received", "paid"]),
         bank_account: prev.bank_account || guess(bh, ["bankaccount", "accountnumber", "iban", "sortcode", "account"]),
         bank_transaction_type: prev.bank_transaction_type || guess(bh, ["transactiontype", "txntype", "type", "category"]),
