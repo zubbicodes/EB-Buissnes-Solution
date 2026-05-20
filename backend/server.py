@@ -515,27 +515,28 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
             continue
 
         ref_methods = [m for m in ms if m["method"] == "reference"]
+        # Strict FULL-promotion uses only WRatio-based debtor_name matches, NOT debtor_tokens (Pass 2.5).
+        debtor_name_methods = [m for m in ms if m["method"] == "debtor_name"]
         debtor_methods = [m for m in ms if m["method"] in ("debtor_name", "debtor_tokens")]
         fully_consumed = b["remaining"] <= 0.005
 
         # Rule A: pure reference match, fully consumed
         rule_a = bool(ref_methods) and not debtor_methods and fully_consumed
-        # Rule B: single debtor match with very high confidence + exact amount + unique candidate
+        # Rule B: single debtor_name match (NOT debtor_tokens) with very high confidence + exact amount + unique candidate
         rule_b = (
             len(ms) == 1
             and not ref_methods
-            and debtor_methods
-            and debtor_methods[0].get("score", 0) >= 95
-            and debtor_methods[0].get("ambiguous") is False
+            and debtor_name_methods
+            and debtor_name_methods[0].get("score", 0) >= 95
+            and debtor_name_methods[0].get("ambiguous") is False
             and fully_consumed
         )
-        # Rule C: reference match + supporting debtor match (>=85) + fully consumed
-        # The double-confirm is even stronger evidence than a pure reference match alone.
+        # Rule C: reference match + supporting debtor_name match (>=85, NOT debtor_tokens) + fully consumed
         rule_c = (
             bool(ref_methods)
-            and debtor_methods
+            and debtor_name_methods
             and fully_consumed
-            and max((m.get("score", 0) for m in debtor_methods), default=0) >= 85
+            and max((m.get("score", 0) for m in debtor_name_methods), default=0) >= 85
         )
 
         if rule_a or rule_b or rule_c:
@@ -545,10 +546,10 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
                 refs = ", ".join(m["reason"].split("'")[1] for m in ref_methods if "'" in m.get("reason", ""))
                 reason_parts.append(f"Invoice reference{'s' if len(ref_methods) > 1 else ''} {refs} matched and exact amount consumed")
             if rule_b:
-                m = debtor_methods[0]
+                m = debtor_name_methods[0]
                 reason_parts.append(f"Unique debtor match at {m['score']}% with exact amount")
             if rule_c and not rule_a:
-                best_d = max(debtor_methods, key=lambda x: x.get("score", 0))
+                best_d = max(debtor_name_methods, key=lambda x: x.get("score", 0))
                 refs = ", ".join(m["reason"].split("'")[1] for m in ref_methods if "'" in m.get("reason", ""))
                 reason_parts.append(f"Reference {refs} confirmed by debtor name ({best_d['score']}%) and exact amount")
             b["reason"] = " · ".join(reason_parts)
@@ -568,7 +569,10 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
                 bits.append(f"Reference match but {fmt_money(b['remaining'])} unallocated")
             if debtor_methods:
                 m_best = max(debtor_methods, key=lambda x: x.get("score", 0))
-                bits.append(f"Debtor name similarity {m_best.get('score', '?')}%")
+                if m_best.get("method") == "debtor_tokens":
+                    bits.append(f"Token-substring match {m_best.get('score', '?')}% (low confidence — review required)")
+                else:
+                    bits.append(f"Debtor name similarity {m_best.get('score', '?')}%")
                 if ambiguous:
                     bits.append("multiple candidates — needs review")
             if not ref_methods and not debtor_methods:

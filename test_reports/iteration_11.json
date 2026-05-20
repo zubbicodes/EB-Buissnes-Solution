@@ -1,0 +1,43 @@
+{
+  "summary": "ITER11 verification: Rule B/C debtor_tokens leak from iter10 is FIXED. server.py:519 introduces debtor_name_methods (strict: method=='debtor_name') used by Rule B (line 526-533) and Rule C (line 534-540); debtor_methods (broader: debtor_name OR debtor_tokens) retained only for PARTIAL reason text (line 566-577). PARTIAL reason now differentiates 'Token-substring match X%' vs 'Debtor name similarity X%'. All 14 iter10_overhaul tests PASS (incl. test_pass_2_5_debtor_tokens_low_confidence reproducer and test_six_row_canonical_scenario 4F/1P/1U with EMMERSON Rule C). All 18 prior regression tests (strict_classification + bearer_auth + auth_refresh) PASS. Total: 49/50 backend tests pass (98%). The one failing test is a stale pre-existing test unrelated to this fix.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "/api/allocations (test_new_features.test_fuzzy_matching_combined_reference_and_payer)",
+        "issue": "STALE TEST — not a regression. Globex bank row scores 90 against 'Globex Industries Ltd' debtor; test expects status='full' but strict Rule B requires score>=95 (in place since iter9). Result is correctly partial/medium per spec. The test pre-dates the strict-classification overhaul and should be updated to expect 'partial'/'medium' (or use a higher-scoring fixture)."
+      }
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_iter10_overhaul.py",
+    "/app/test_reports/pytest/iter11_iter10_overhaul.xml",
+    "/app/test_reports/pytest/iter11_regression.xml",
+    "/app/test_reports/pytest/iter11_full.xml"
+  ],
+  "action_items": [
+    "(LOW) Refresh /app/backend/tests/test_new_features.py::test_fuzzy_matching_combined_reference_and_payer to align with current strict Rule B (score>=95) — either bump the fixture's debtor name similarity above 95 or assert partial/medium for the 90% Globex case. Not blocking the iter11 fix."
+  ],
+  "critical_code_review_comments": [
+    "Iter11 fix is minimal and correct: 1 new variable (debtor_name_methods) used in Rule B and Rule C preconditions; broader debtor_methods retained only for PARTIAL branch reason text. Surgical, low risk.",
+    "PARTIAL reason text is now correctly differentiated: 'Token-substring match X%' for debtor_tokens (Pass 2.5) vs 'Debtor name similarity X%' for debtor_name (Pass 2). Aids reviewer triage.",
+    "Same long-standing recommendations from iter10 still apply: server.py is now 1118 lines — splitting matching engine into its own module would help.",
+    "Deprecation warnings on @app.on_event('startup'/'shutdown') — should migrate to FastAPI lifespan handlers (non-blocking)."
+  ],
+  "updated_files": [],
+  "success_rate": {
+    "backend": "98% (49/50 backend tests; the single failure is a stale unrelated test)",
+    "frontend": "Not re-tested — backend-only fix as specified by main agent"
+  },
+  "test_credentials": "admin@ebbusiness.com / Admin@2026! (worked via /api/auth/login → access_token)",
+  "seed_data_creation": "~14 transient runs via POST /api/allocations during pytest (admin tenant). Not cleaned up; isolated to admin user.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "The Rule B/C debtor_tokens leak from iter10 is fully resolved as of iter11. All targeted reproducer tests pass. If the stale test_fuzzy_matching_combined_reference_and_payer is updated, the full backend suite will be 100% green. The matching engine code is structurally sound; future work should focus on (a) splitting server.py into modules and (b) migrating to FastAPI lifespan handlers.",
+  "rca_of_the_issue": {
+    "iter10_bug": "Rule B/C used debtor_methods (=[m for m in ms if m['method'] in ('debtor_name','debtor_tokens')]). Pass 2.5 token-substring matches (method='debtor_tokens', score=100 via partial_token_set_ratio) trivially passed Rule B's score>=95 gate => incorrect FULL.",
+    "iter11_fix": "server.py:519 adds debtor_name_methods = [m for m in ms if m['method']=='debtor_name']. Rule B (line 526-533) and Rule C (line 534-540) now reference debtor_name_methods, structurally excluding debtor_tokens from FULL promotion. debtor_methods remains for PARTIAL reason construction only.",
+    "verification": "test_pass_2_5_debtor_tokens_low_confidence (reproducer: 'XX9988 RANDOM NOISE FORD CIVIL JOBNO 12-A' £5400 + 'Ford Civil Engineering Construction Ltd' £5400) PASSES — bank row classified PARTIAL with reason 'Token-substring match 100% (low confidence — review required)'. test_six_row_canonical_scenario PASSES — 4 FULL / 1 PARTIAL / 1 UNMATCHED with EMMERSON Rule C firing as expected."
+  }
+}
