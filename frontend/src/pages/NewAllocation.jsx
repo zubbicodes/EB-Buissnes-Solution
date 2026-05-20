@@ -46,29 +46,37 @@ export default function NewAllocation() {
   const [validation, setValidation] = useState(null);
   const [loading, setLoading] = useState(false);
 
-  const detectHeaders = async () => {
-    setLoading(true);
+  const detectHeaders = async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
       const { data } = await api.post("/allocations/preview-headers", { bank_csv: bankCsv, invoice_csv: invCsv });
       setBankHeaders(data.bank_headers || []);
       setInvHeaders(data.invoice_headers || []);
-      // Best-effort default mapping
+      // Best-effort default mapping — only fill keys that aren't already set
       const guess = (headers, candidates) =>
         headers.find((h) => candidates.some((c) => h.toLowerCase().includes(c))) || "";
-      setMapping({
-        bank_date: guess(data.bank_headers || [], ["date"]),
-        bank_reference: guess(data.bank_headers || [], ["ref", "desc", "narrative"]),
-        bank_payer: guess(data.bank_headers || [], ["payer", "name", "party", "counter"]),
-        bank_amount: guess(data.bank_headers || [], ["amount", "credit", "value"]),
-        invoice_number: guess(data.invoice_headers || [], ["invoice", "number", "no"]),
-        invoice_debtor: guess(data.invoice_headers || [], ["debtor", "customer", "client", "name"]),
-        invoice_amount: guess(data.invoice_headers || [], ["amount", "total", "value"]),
-        invoice_date: guess(data.invoice_headers || [], ["date"]),
-        invoice_outstanding: guess(data.invoice_headers || [], ["outstanding", "balance", "due"]),
-      });
-    } catch (e) { toast.error(formatError(e)); }
-    setLoading(false);
+      setMapping((prev) => ({
+        bank_date: prev.bank_date || guess(data.bank_headers || [], ["date"]),
+        bank_reference: prev.bank_reference || guess(data.bank_headers || [], ["ref", "desc", "narrative"]),
+        bank_payer: prev.bank_payer || guess(data.bank_headers || [], ["payer", "name", "party", "counter"]),
+        bank_amount: prev.bank_amount || guess(data.bank_headers || [], ["amount", "credit", "value"]),
+        invoice_number: prev.invoice_number || guess(data.invoice_headers || [], ["invoice", "number", "no"]),
+        invoice_debtor: prev.invoice_debtor || guess(data.invoice_headers || [], ["debtor", "customer", "client", "name"]),
+        invoice_amount: prev.invoice_amount || guess(data.invoice_headers || [], ["amount", "total", "value"]),
+        invoice_date: prev.invoice_date || guess(data.invoice_headers || [], ["date"]),
+        invoice_outstanding: prev.invoice_outstanding || guess(data.invoice_headers || [], ["outstanding", "balance", "due"]),
+      }));
+    } catch (e) { if (!silent) toast.error(formatError(e)); }
+    if (!silent) setLoading(false);
   };
+
+  // Auto-detect headers whenever CSV text changes (debounced)
+  useEffect(() => {
+    if (!bankCsv && !invCsv) return;
+    const t = setTimeout(() => { detectHeaders(true); }, 400);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bankCsv, invCsv]);
 
   const validate = async () => {
     setLoading(true); setValidation(null);
@@ -162,7 +170,7 @@ export default function NewAllocation() {
             <div className="border-t border-slate-200 pt-6">
               <div className="flex items-center justify-between mb-4">
                 <h3 className="font-display font-semibold text-lg">Column mapping</h3>
-                <button onClick={detectHeaders} disabled={loading} data-testid="detect-headers-btn"
+                <button onClick={() => detectHeaders(false)} disabled={loading} data-testid="detect-headers-btn"
                   className="text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-md transition-colors">
                   {loading ? "Detecting…" : "Auto-detect"}
                 </button>
