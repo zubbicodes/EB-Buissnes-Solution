@@ -15,7 +15,7 @@ import jwt
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Dict, Any
 
-from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, status
+from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, status, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -92,12 +92,16 @@ class ColumnMapping(BaseModel):
     bank_reference: Optional[str] = None
     bank_amount: Optional[str] = None
     bank_payer: Optional[str] = None
+    bank_account: Optional[str] = None
+    bank_transaction_type: Optional[str] = None
     # invoice
     invoice_number: Optional[str] = None
     invoice_debtor: Optional[str] = None
     invoice_amount: Optional[str] = None
     invoice_date: Optional[str] = None
     invoice_outstanding: Optional[str] = None
+    invoice_due_date: Optional[str] = None
+    invoice_customer_reference: Optional[str] = None
 
 class AllocationCreate(BaseModel):
     name: str
@@ -186,12 +190,16 @@ def validate_csvs(bank_csv: str, invoice_csv: str, mapping: ColumnMapping) -> Di
     check_col(bank_rows, mapping.bank_amount, "bank", "amount")
     check_col(bank_rows, mapping.bank_date, "bank", "date", required=False)
     check_col(bank_rows, mapping.bank_payer, "bank", "payer", required=False)
+    check_col(bank_rows, mapping.bank_account, "bank", "account", required=False)
+    check_col(bank_rows, mapping.bank_transaction_type, "bank", "transaction_type", required=False)
 
     check_col(inv_rows, mapping.invoice_number, "invoice", "number")
     check_col(inv_rows, mapping.invoice_debtor, "invoice", "debtor")
     check_col(inv_rows, mapping.invoice_amount, "invoice", "amount")
     check_col(inv_rows, mapping.invoice_outstanding, "invoice", "outstanding", required=False)
     check_col(inv_rows, mapping.invoice_date, "invoice", "date", required=False)
+    check_col(inv_rows, mapping.invoice_due_date, "invoice", "due_date", required=False)
+    check_col(inv_rows, mapping.invoice_customer_reference, "invoice", "customer_reference", required=False)
 
     # Row-level checks
     if mapping.bank_amount:
@@ -212,6 +220,29 @@ def validate_csvs(bank_csv: str, invoice_csv: str, mapping: ColumnMapping) -> Di
             errors.append({"scope": "bank", "message": "All bank amounts are zero."})
         if negs:
             warnings.append({"scope": "bank", "message": f"{negs} bank row(s) have negative amounts (refunds/withdrawals)."})
+
+    # Invalid date format warnings
+    def check_dates(rows, col, scope):
+        if not col:
+            return
+        bad = 0
+        for i, r in enumerate(rows, start=2):
+            raw = r.get(col, "").strip()
+            if raw and parse_date_safe(raw) is None:
+                bad += 1
+                if bad <= 3:
+                    warnings.append({"scope": scope, "row": i, "message": f"Unrecognised date format in '{col}': '{raw}'"})
+        if bad > 3:
+            warnings.append({"scope": scope, "message": f"{bad} row(s) total have unparseable dates in '{col}'."})
+    check_dates(bank_rows, mapping.bank_date, "bank")
+    check_dates(inv_rows, mapping.invoice_date, "invoice")
+    check_dates(inv_rows, mapping.invoice_due_date, "invoice")
+
+    # Missing debtor names
+    if mapping.invoice_debtor and inv_rows:
+        missing_debtor = sum(1 for r in inv_rows if not r.get(mapping.invoice_debtor, "").strip())
+        if missing_debtor:
+            warnings.append({"scope": "invoice", "message": f"{missing_debtor} invoice row(s) have no debtor name — fuzzy matching will skip these."})
 
     if mapping.invoice_number and inv_rows:
         seen = {}
@@ -245,6 +276,20 @@ def extract_refs(text: str) -> List[str]:
 
 def normalize_num(s: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", (s or "").upper())
+
+
+CORP_SUFFIXES = {
+    "ltd", "limited", "llc", "inc", "incorporated", "co", "company", "plc",
+    "corp", "corporation", "gmbh", "sa", "ag", "bv", "nv", "srl", "spa", "llp", "lp", "kg",
+}
+
+def strip_corp_suffix(s: str) -> str:
+    """Remove generic corporate suffix tokens for tighter fuzzy comparison."""
+    if not s:
+        return ""
+    tokens = re.findall(r"[A-Za-z0-9]+", s)
+    keep = [t for t in tokens if t.lower() not in CORP_SUFFIXES]
+    return " ".join(keep) if keep else s
 
 
 def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
@@ -342,16 +387,23 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
             b["matches"].append(link)
             inv["matches"].append(link)
 
-    # Pass 2: fuzzy debtor name fallback for bank rows still unmatched
+    # Pass 2: fuzzy debtor name fallback — compare debtor against bank reference text + payer.
     for b in bank_rows:
-        if b["remaining"] <= 0 or not b["payer"]:
+        if b["remaining"] <= 0:
+            continue
+        compare_text = " ".join([t for t in [b.get("reference") or "", b.get("payer") or ""] if t]).strip()
+        compare_text_clean = strip_corp_suffix(compare_text)
+        if not compare_text_clean:
             continue
         scored = []
         for inv in invoice_rows:
             if inv["remaining"] <= 0 or not inv["debtor"]:
                 continue
-            score = fuzz.token_set_ratio(b["payer"], inv["debtor"])
-            if score >= 75:
+            debtor_clean = strip_corp_suffix(inv["debtor"])
+            if not debtor_clean:
+                continue
+            score = fuzz.WRatio(compare_text_clean, debtor_clean)
+            if score >= 80:
                 scored.append((score, inv))
         scored.sort(key=lambda x: (-x[0], -x[1]["remaining"]))
         for score, inv in scored:
@@ -362,7 +414,7 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
                 continue
             b["remaining"] = round(b["remaining"] - alloc, 2)
             inv["remaining"] = round(inv["remaining"] - alloc, 2)
-            confidence = "medium" if score >= 85 else "low"
+            confidence = "medium" if score >= 90 else "low"
             link = {
                 "bank_id": b["id"],
                 "invoice_id": inv["id"],
@@ -493,30 +545,71 @@ async def write_audit(user_id: str, run_id: Optional[str], action: str, details:
     })
 
 
+async def _process_run_async(run_id: str, user_id: str, bank_csv: str, invoice_csv: str, mapping_dict: Dict[str, Any]):
+    """Background processor for large allocation runs."""
+    try:
+        mapping = ColumnMapping(**mapping_dict)
+        bank_raw = parse_csv(bank_csv)
+        inv_raw = parse_csv(invoice_csv)
+        bank_rows, invoice_rows, stats = run_matching(bank_raw, inv_raw, mapping)
+        await db.allocation_runs.update_one(
+            {"id": run_id, "user_id": user_id},
+            {"$set": {
+                "bank_rows": bank_rows,
+                "invoice_rows": invoice_rows,
+                "stats": stats,
+                "status": "done",
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }},
+        )
+        await write_audit(user_id, run_id, "create_run", {"stats": stats, "async": True})
+    except Exception as e:
+        logger.exception("Async run failed: %s", e)
+        await db.allocation_runs.update_one(
+            {"id": run_id, "user_id": user_id},
+            {"$set": {"status": "error", "error": str(e)}},
+        )
+
+
 @api.post("/allocations")
-async def create_allocation(payload: AllocationCreate, current=Depends(get_current_user)):
+async def create_allocation(payload: AllocationCreate, background: BackgroundTasks, current=Depends(get_current_user)):
     validation = validate_csvs(payload.bank_csv, payload.invoice_csv, payload.mapping)
     if not validation["ok"]:
         raise HTTPException(status_code=400, detail={"message": "CSV validation failed", "validation": validation})
     if validation["warnings"] and not payload.proceed_with_warnings:
         raise HTTPException(status_code=400, detail={"message": "CSV has warnings", "validation": validation})
 
-    bank_raw = parse_csv(payload.bank_csv)
-    inv_raw = parse_csv(payload.invoice_csv)
-    bank_rows, invoice_rows, stats = run_matching(bank_raw, inv_raw, payload.mapping)
+    bank_row_count = validation.get("bank_row_count", 0)
+    invoice_row_count = validation.get("invoice_row_count", 0)
+    is_large = bank_row_count > 5000 or invoice_row_count > 5000
 
     run_id = str(uuid.uuid4())
-    doc = {
+    base_doc = {
         "id": run_id,
         "user_id": current["id"],
         "name": payload.name,
         "period": payload.period,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "mapping": payload.mapping.model_dump(),
-        "bank_rows": bank_rows,
-        "invoice_rows": invoice_rows,
-        "stats": stats,
+        "status": "processing" if is_large else "done",
     }
+
+    if is_large:
+        # Insert pending doc, process in background
+        await db.allocation_runs.insert_one({**base_doc, "bank_rows": [], "invoice_rows": [], "stats": {
+            "total_bank": bank_row_count, "total_invoices": invoice_row_count,
+            "fully_matched": 0, "partially_matched": 0, "unmatched_bank": 0,
+            "unmatched_invoices": 0, "total_allocated": 0.0, "total_outstanding": 0.0,
+        }})
+        background.add_task(_process_run_async, run_id, current["id"], payload.bank_csv, payload.invoice_csv, payload.mapping.model_dump())
+        doc = await db.allocation_runs.find_one({"id": run_id, "user_id": current["id"]}, {"_id": 0})
+        return doc
+
+    bank_raw = parse_csv(payload.bank_csv)
+    inv_raw = parse_csv(payload.invoice_csv)
+    bank_rows, invoice_rows, stats = run_matching(bank_raw, inv_raw, payload.mapping)
+
+    doc = {**base_doc, "bank_rows": bank_rows, "invoice_rows": invoice_rows, "stats": stats}
     await db.allocation_runs.insert_one(doc)
     await write_audit(current["id"], run_id, "create_run", {
         "name": payload.name, "period": payload.period, "stats": stats,

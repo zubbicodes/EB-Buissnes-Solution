@@ -5,18 +5,22 @@ import { toast } from "sonner";
 import { ArrowLeft, ArrowRight, Check, FileUp, AlertCircle, CheckCircle2 } from "lucide-react";
 
 const BANK_FIELDS = [
-  ["bank_date", "Date", false],
-  ["bank_reference", "Reference / Description", true],
+  ["bank_date", "Transaction Date", false],
+  ["bank_reference", "Reference Text", true],
   ["bank_payer", "Payer / Counter-party", false],
   ["bank_amount", "Amount", true],
+  ["bank_account", "Bank Account", false],
+  ["bank_transaction_type", "Transaction Type", false],
 ];
 
 const INV_FIELDS = [
-  ["invoice_date", "Date", false],
+  ["invoice_date", "Invoice Date", false],
   ["invoice_number", "Invoice Number", true],
   ["invoice_debtor", "Debtor / Customer", true],
   ["invoice_amount", "Amount", true],
   ["invoice_outstanding", "Outstanding (optional)", false],
+  ["invoice_due_date", "Due Date", false],
+  ["invoice_customer_reference", "Customer Reference", false],
 ];
 
 const SAMPLE_BANK = `Date,Reference,Payer,Amount
@@ -56,15 +60,19 @@ export default function NewAllocation() {
       const guess = (headers, candidates) =>
         headers.find((h) => candidates.some((c) => h.toLowerCase().includes(c))) || "";
       setMapping((prev) => ({
-        bank_date: prev.bank_date || guess(data.bank_headers || [], ["date"]),
-        bank_reference: prev.bank_reference || guess(data.bank_headers || [], ["ref", "desc", "narrative"]),
-        bank_payer: prev.bank_payer || guess(data.bank_headers || [], ["payer", "name", "party", "counter"]),
+        bank_date: prev.bank_date || guess(data.bank_headers || [], ["transaction_date", "date"]),
+        bank_reference: prev.bank_reference || guess(data.bank_headers || [], ["reference_text", "reference", "ref", "desc", "narrative"]),
+        bank_payer: prev.bank_payer || guess(data.bank_headers || [], ["payer", "party", "counter"]),
         bank_amount: prev.bank_amount || guess(data.bank_headers || [], ["amount", "credit", "value"]),
-        invoice_number: prev.invoice_number || guess(data.invoice_headers || [], ["invoice", "number", "no"]),
-        invoice_debtor: prev.invoice_debtor || guess(data.invoice_headers || [], ["debtor", "customer", "client", "name"]),
-        invoice_amount: prev.invoice_amount || guess(data.invoice_headers || [], ["amount", "total", "value"]),
-        invoice_date: prev.invoice_date || guess(data.invoice_headers || [], ["date"]),
+        bank_account: prev.bank_account || guess(data.bank_headers || [], ["bank_account", "account"]),
+        bank_transaction_type: prev.bank_transaction_type || guess(data.bank_headers || [], ["transaction_type", "type"]),
+        invoice_number: prev.invoice_number || guess(data.invoice_headers || [], ["invoice_number", "invoice", "number", "no"]),
+        invoice_debtor: prev.invoice_debtor || guess(data.invoice_headers || [], ["debtor_name", "debtor", "customer", "client", "name"]),
+        invoice_amount: prev.invoice_amount || guess(data.invoice_headers || [], ["invoice_amount", "amount", "total", "value"]),
+        invoice_date: prev.invoice_date || guess(data.invoice_headers || [], ["invoice_date", "date"]),
         invoice_outstanding: prev.invoice_outstanding || guess(data.invoice_headers || [], ["outstanding", "balance", "due"]),
+        invoice_due_date: prev.invoice_due_date || guess(data.invoice_headers || [], ["due_date", "due"]),
+        invoice_customer_reference: prev.invoice_customer_reference || guess(data.invoice_headers || [], ["customer_reference", "cust_ref"]),
       }));
     } catch (e) { if (!silent) toast.error(formatError(e)); }
     if (!silent) setLoading(false);
@@ -215,45 +223,116 @@ export default function NewAllocation() {
 
 function CsvStep({ title, description, value, setValue, sample, testid }) {
   const inputRef = useRef(null);
-  const onFile = async (e) => {
-    const f = e.target.files?.[0];
+  const [dragOver, setDragOver] = useState(false);
+
+  const readFile = async (f) => {
     if (!f) return;
+    if (!/\.csv$/i.test(f.name) && f.type !== "text/csv") {
+      toast.error(`'${f.name}' doesn't look like a CSV file.`);
+      return;
+    }
+    if (f.size > 25 * 1024 * 1024) {
+      toast.error("File is over 25 MB — please trim it down first.");
+      return;
+    }
     const text = await f.text();
     setValue(text);
-    // allow re-uploading the same file
-    if (inputRef.current) inputRef.current.value = "";
     toast.success(`Loaded ${f.name}`);
   };
+
+  const onFile = async (e) => {
+    await readFile(e.target.files?.[0]);
+    if (inputRef.current) inputRef.current.value = "";
+  };
+
+  const onDrop = async (e) => {
+    e.preventDefault();
+    setDragOver(false);
+    await readFile(e.dataTransfer.files?.[0]);
+  };
+
+  // Parse preview rows
+  const parsePreview = (csvText) => {
+    if (!csvText) return { headers: [], rows: [] };
+    const lines = csvText.split("\n").slice(0, 6).filter((l) => l.trim());
+    if (lines.length === 0) return { headers: [], rows: [] };
+    const headers = lines[0].split(",").map((h) => h.trim().replace(/^["']|["']$/g, ""));
+    const rows = lines.slice(1, 5).map((l) => l.split(",").map((c) => c.trim().replace(/^["']|["']$/g, "")));
+    return { headers, rows };
+  };
+  const preview = parsePreview(value);
   const rowCount = Math.max(0, (value.match(/\n/g) || []).length);
-  const headerPreview = value.split("\n")[0]?.split(",").slice(0, 6).join(", ");
+
   return (
     <div>
       <h3 className="font-display font-semibold text-lg">{title}</h3>
       <p className="text-sm text-slate-500 mt-1">{description}</p>
-      <div className="mt-4 flex flex-wrap items-center gap-3">
-        <label className="inline-flex items-center gap-2 text-sm font-semibold bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-md cursor-pointer">
-          <FileUp className="h-4 w-4" /> Upload CSV
-          <input ref={inputRef} type="file" accept=".csv,text/csv" className="hidden" onChange={onFile} data-testid={`${testid}-file`} />
-        </label>
-        <button onClick={() => setValue(sample)} className="text-xs font-semibold text-emerald-700 hover:underline" data-testid={`${testid}-sample`}>
-          Use sample data
-        </button>
-        {value && (
-          <button onClick={() => setValue("")} className="text-xs font-semibold text-slate-500 hover:text-slate-800" data-testid={`${testid}-clear`}>
-            Clear
+
+      <div
+        onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={onDrop}
+        className={`mt-4 rounded-md border-2 border-dashed transition-colors p-6 text-center ${
+          dragOver ? "border-emerald-500 bg-emerald-50" : "border-slate-200 bg-slate-50/40"
+        }`}
+        data-testid={`${testid}-dropzone`}
+      >
+        <FileUp className="h-7 w-7 text-slate-400 mx-auto" />
+        <div className="mt-2 text-sm text-slate-600">
+          <label className="inline-flex items-center gap-1.5 font-semibold text-emerald-700 hover:underline cursor-pointer">
+            Click to upload
+            <input ref={inputRef} type="file" accept=".csv,text/csv" className="hidden" onChange={onFile} data-testid={`${testid}-file`} />
+          </label>
+          <span className="text-slate-500"> or drag &amp; drop a .csv here</span>
+        </div>
+        <div className="mt-2 text-xs text-slate-400">
+          <button onClick={() => setValue(sample)} className="font-semibold text-emerald-700 hover:underline" data-testid={`${testid}-sample`}>
+            Or use sample data
           </button>
-        )}
-        <div className="text-xs text-slate-400 ml-auto">{rowCount} rows</div>
+          {value && (
+            <>
+              <span className="mx-2">·</span>
+              <button onClick={() => setValue("")} className="font-semibold text-slate-500 hover:text-slate-800" data-testid={`${testid}-clear`}>
+                Clear
+              </button>
+            </>
+          )}
+        </div>
       </div>
+
       {value && (
-        <div className="mt-3 text-xs text-slate-500" data-testid={`${testid}-headers-preview`}>
-          <span className="font-semibold uppercase tracking-wider">Headers:</span> <span className="font-mono">{headerPreview || "(empty)"}</span>
+        <div className="mt-4">
+          <div className="flex items-center justify-between text-xs text-slate-500 mb-2">
+            <div className="font-semibold uppercase tracking-wider">Preview · first 4 rows</div>
+            <div>{rowCount} data rows total</div>
+          </div>
+          <div className="border border-slate-200 rounded-md overflow-x-auto bg-white" data-testid={`${testid}-preview-table`}>
+            <table className="w-full text-xs">
+              <thead className="bg-slate-50 text-slate-600 uppercase tracking-wider">
+                <tr>{preview.headers.map((h, i) => <th key={i} className="px-3 py-2 text-left font-semibold whitespace-nowrap">{h}</th>)}</tr>
+              </thead>
+              <tbody>
+                {preview.rows.map((r, i) => (
+                  <tr key={i} className="border-t border-slate-100">
+                    {r.map((c, j) => <td key={j} className="px-3 py-1.5 font-mono whitespace-nowrap">{c}</td>)}
+                  </tr>
+                ))}
+                {preview.rows.length === 0 && (
+                  <tr><td className="px-3 py-3 text-slate-400" colSpan={Math.max(1, preview.headers.length)}>No data rows yet (headers only).</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
-      <textarea value={value} onChange={(e) => setValue(e.target.value)} rows={10} spellCheck={false}
-        placeholder="Paste your CSV here…"
-        className="mt-3 w-full border border-slate-200 rounded-md p-3 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
-        data-testid={`${testid}-textarea`} />
+
+      <details className="mt-4">
+        <summary className="text-xs text-slate-500 cursor-pointer hover:text-slate-800">Or paste raw CSV text</summary>
+        <textarea value={value} onChange={(e) => setValue(e.target.value)} rows={8} spellCheck={false}
+          placeholder="Paste your CSV here…"
+          className="mt-2 w-full border border-slate-200 rounded-md p-3 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
+          data-testid={`${testid}-textarea`} />
+      </details>
     </div>
   );
 }

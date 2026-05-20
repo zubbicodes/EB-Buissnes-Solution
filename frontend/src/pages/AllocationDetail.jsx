@@ -31,6 +31,7 @@ export default function AllocationDetail() {
     try {
       const { data } = await api.get(`/allocations/${id}`);
       setRun(data);
+      return data;
     } catch (e) { toast.error(formatError(e)); }
   };
   const loadAudit = async () => {
@@ -41,6 +42,17 @@ export default function AllocationDetail() {
   };
   useEffect(() => { load(); }, [id]);
   useEffect(() => { if (tab === "audit") loadAudit(); }, [tab]);
+
+  // Poll while run is still processing
+  useEffect(() => {
+    if (run?.status !== "processing") return;
+    const t = setInterval(async () => {
+      const d = await load();
+      if (d?.status !== "processing") clearInterval(t);
+    }, 2000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [run?.status]);
 
   const invById = useMemo(() => Object.fromEntries((run?.invoice_rows || []).map((i) => [i.id, i])), [run]);
 
@@ -58,6 +70,37 @@ export default function AllocationDetail() {
   const exportXlsxUrl = `${API_BASE}/allocations/${id}/export-xlsx`;
 
   if (!run) return <div className="text-slate-500" data-testid="loading">Loading…</div>;
+
+  if (run.status === "processing") {
+    return (
+      <div data-testid="processing-page">
+        <Link to="/dashboard" className="inline-flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-900 mb-3">
+          <ArrowLeft className="h-3.5 w-3.5" /> Back to dashboard
+        </Link>
+        <div className="bg-white border border-slate-200 rounded-md p-10 text-center">
+          <div className="h-10 w-10 mx-auto rounded-full border-4 border-emerald-200 border-t-emerald-600 animate-spin" />
+          <h2 className="font-display font-semibold text-xl mt-4">Processing &ldquo;{run.name}&rdquo;</h2>
+          <p className="text-sm text-slate-500 mt-2">
+            Large file detected ({run.stats?.total_bank || 0} bank rows × {run.stats?.total_invoices || 0} invoices).
+            We&rsquo;ll auto-refresh this page when matching is complete.
+          </p>
+        </div>
+      </div>
+    );
+  }
+  if (run.status === "error") {
+    return (
+      <div data-testid="error-page">
+        <Link to="/dashboard" className="inline-flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-900 mb-3">
+          <ArrowLeft className="h-3.5 w-3.5" /> Back to dashboard
+        </Link>
+        <div className="bg-rose-50 border border-rose-200 rounded-md p-6">
+          <h2 className="font-semibold text-rose-900">Run failed</h2>
+          <p className="text-sm text-rose-900 mt-2 font-mono">{run.error || "Unknown error"}</p>
+        </div>
+      </div>
+    );
+  }
 
   const total = run.stats.total_bank || 0;
   const unmatchedRate = total > 0 ? Math.round(((run.stats.unmatched_bank || 0) / total) * 100) : 0;
