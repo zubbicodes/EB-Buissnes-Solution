@@ -3,9 +3,31 @@ import axios from "axios";
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 export const API_BASE = `${BACKEND_URL}/api`;
 
+const TOKEN_KEY = "ebrr_access_token";
+
+export function getToken() {
+  try { return localStorage.getItem(TOKEN_KEY) || ""; } catch { return ""; }
+}
+export function setToken(t) {
+  try {
+    if (t) localStorage.setItem(TOKEN_KEY, t);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch { /* ignore */ }
+}
+
 export const api = axios.create({
   baseURL: API_BASE,
-  withCredentials: true,
+  withCredentials: true, // keep cookies as a fallback
+});
+
+// Attach Authorization header on every request when we have a token.
+api.interceptors.request.use((config) => {
+  const t = getToken();
+  if (t) {
+    config.headers = config.headers || {};
+    config.headers.Authorization = `Bearer ${t}`;
+  }
+  return config;
 });
 
 export function formatError(err) {

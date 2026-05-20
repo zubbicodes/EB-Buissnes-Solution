@@ -491,7 +491,7 @@ async def register(payload: RegisterIn, response: Response):
     access = create_access_token(user_id, email)
     refresh = create_refresh_token(user_id)
     set_auth_cookies(response, access, refresh)
-    return {"id": user_id, "email": email, "name": payload.name}
+    return {"id": user_id, "email": email, "name": payload.name, "access_token": access, "refresh_token": refresh}
 
 
 @api.post("/auth/login")
@@ -503,7 +503,7 @@ async def login(payload: LoginIn, response: Response):
     access = create_access_token(user["id"], email)
     refresh = create_refresh_token(user["id"])
     set_auth_cookies(response, access, refresh)
-    return {"id": user["id"], "email": user["email"], "name": user.get("name", "")}
+    return {"id": user["id"], "email": user["email"], "name": user.get("name", ""), "access_token": access, "refresh_token": refresh}
 
 
 @api.post("/auth/logout")
