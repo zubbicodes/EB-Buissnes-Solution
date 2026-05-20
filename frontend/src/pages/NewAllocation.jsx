@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, formatError } from "@/lib/api";
 import { toast } from "sonner";
@@ -95,10 +95,6 @@ export default function NewAllocation() {
   const steps = ["Details", "Bank CSV", "Invoice CSV & Mapping", "Validate & Run"];
 
   const next = async () => {
-    if (step === 2 || step === 3) {
-      // attempt to detect headers when moving past CSV step
-      if (bankHeaders.length === 0 && bankCsv) await detectHeaders();
-    }
     if (step === 4) return submit();
     setStep((s) => Math.min(4, s + 1));
   };
@@ -210,12 +206,18 @@ export default function NewAllocation() {
 }
 
 function CsvStep({ title, description, value, setValue, sample, testid }) {
+  const inputRef = useRef(null);
   const onFile = async (e) => {
     const f = e.target.files?.[0];
     if (!f) return;
     const text = await f.text();
     setValue(text);
+    // allow re-uploading the same file
+    if (inputRef.current) inputRef.current.value = "";
+    toast.success(`Loaded ${f.name}`);
   };
+  const rowCount = Math.max(0, (value.match(/\n/g) || []).length);
+  const headerPreview = value.split("\n")[0]?.split(",").slice(0, 6).join(", ");
   return (
     <div>
       <h3 className="font-display font-semibold text-lg">{title}</h3>
@@ -223,14 +225,24 @@ function CsvStep({ title, description, value, setValue, sample, testid }) {
       <div className="mt-4 flex flex-wrap items-center gap-3">
         <label className="inline-flex items-center gap-2 text-sm font-semibold bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-md cursor-pointer">
           <FileUp className="h-4 w-4" /> Upload CSV
-          <input type="file" accept=".csv,text/csv" className="hidden" onChange={onFile} data-testid={`${testid}-file`} />
+          <input ref={inputRef} type="file" accept=".csv,text/csv" className="hidden" onChange={onFile} data-testid={`${testid}-file`} />
         </label>
         <button onClick={() => setValue(sample)} className="text-xs font-semibold text-emerald-700 hover:underline" data-testid={`${testid}-sample`}>
           Use sample data
         </button>
-        <div className="text-xs text-slate-400 ml-auto">{(value.match(/\n/g) || []).length} rows</div>
+        {value && (
+          <button onClick={() => setValue("")} className="text-xs font-semibold text-slate-500 hover:text-slate-800" data-testid={`${testid}-clear`}>
+            Clear
+          </button>
+        )}
+        <div className="text-xs text-slate-400 ml-auto">{rowCount} rows</div>
       </div>
-      <textarea value={value} onChange={(e) => setValue(e.target.value)} rows={12} spellCheck={false}
+      {value && (
+        <div className="mt-3 text-xs text-slate-500" data-testid={`${testid}-headers-preview`}>
+          <span className="font-semibold uppercase tracking-wider">Headers:</span> <span className="font-mono">{headerPreview || "(empty)"}</span>
+        </div>
+      )}
+      <textarea value={value} onChange={(e) => setValue(e.target.value)} rows={10} spellCheck={false}
         placeholder="Paste your CSV here…"
         className="mt-3 w-full border border-slate-200 rounded-md p-3 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
         data-testid={`${testid}-textarea`} />
@@ -242,6 +254,11 @@ function MappingGroup({ title, fields, headers, mapping, setMapping }) {
   return (
     <div>
       <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-3">{title}</div>
+      {headers.length === 0 ? (
+        <div className="text-xs text-slate-400 border border-dashed border-slate-200 rounded-md p-4">
+          Paste or upload a CSV above to populate column options.
+        </div>
+      ) : null}
       <div className="space-y-3">
         {fields.map(([key, label, required]) => (
           <div key={key} className="flex items-center gap-3">
@@ -249,7 +266,8 @@ function MappingGroup({ title, fields, headers, mapping, setMapping }) {
               {label} {required && <span className="text-rose-500">*</span>}
             </label>
             <select value={mapping[key] || ""} onChange={(e) => setMapping((m) => ({ ...m, [key]: e.target.value }))}
-              className="flex-1 border border-slate-200 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
+              disabled={headers.length === 0}
+              className="flex-1 border border-slate-200 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30 disabled:bg-slate-50 disabled:text-slate-400"
               data-testid={`map-${key}`}>
               <option value="">— Select column —</option>
               {headers.map((h) => <option key={h} value={h}>{h}</option>)}

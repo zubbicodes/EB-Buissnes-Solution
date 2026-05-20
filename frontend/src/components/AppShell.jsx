@@ -26,8 +26,8 @@ export default function AppShell({ children }) {
             <Building2 className="h-5 w-5 text-white" />
           </div>
           <div>
-            <div className="font-display font-bold leading-tight">Cash Allocator</div>
-            <div className="text-[10px] uppercase tracking-[0.18em] text-slate-400">EB Business Solutions</div>
+            <div className="font-display font-bold leading-tight text-sm">Receivables<br/>Reconciliation</div>
+            <div className="text-[10px] uppercase tracking-[0.18em] text-slate-400 mt-1">EB Business Solutions</div>
           </div>
         </Link>
 

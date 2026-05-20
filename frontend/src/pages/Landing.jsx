@@ -19,7 +19,7 @@ export default function Landing() {
           <div className="h-10 w-10 rounded-md bg-gradient-to-br from-emerald-500 to-blue-600" />
           <div>
             <div className="font-display font-bold text-lg">EB Business Solutions</div>
-            <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Cash Allocator</div>
+            <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Receivables Reconciliation Platform</div>
           </div>
         </div>
         <div className="flex items-center gap-3">
@@ -38,12 +38,12 @@ export default function Landing() {
             BUILT FOR FINANCE TEAMS
           </div>
           <h1 className="font-display font-bold text-5xl lg:text-6xl mt-5 tracking-tight leading-[1.05]">
-            Allocate every <span className="text-emerald-600">£ received</span>,<br />
+            Reconcile every <span className="text-emerald-600">£ received</span>,<br />
             month after month.
           </h1>
           <p className="mt-6 text-lg text-slate-600 max-w-xl">
-            Upload your bank statement and invoice listing. We&rsquo;ll partially match cash against open invoices using
-            reference numbers and fuzzy debtor name matching — then let you override anything manually.
+            Upload your bank statement and invoice listing. We&rsquo;ll partially allocate cash receipts against open
+            receivables using reference numbers and fuzzy debtor name matching — then let you override anything manually.
           </p>
           <div className="mt-8 flex flex-wrap items-center gap-4">
             <Link to="/signup" data-testid="hero-cta" className="inline-flex items-center gap-2 gradient-cta text-white font-semibold px-6 py-3.5 rounded-md hover:opacity-95 transition">

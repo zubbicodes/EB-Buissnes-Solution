@@ -414,7 +414,7 @@ api = APIRouter(prefix="/api")
 
 @api.get("/")
 async def root():
-    return {"app": "Cash Allocator", "company": "EB Business Solutions Limited"}
+    return {"app": "Receivables Reconciliation Platform", "company": "EB Business Solutions Limited"}
 
 
 # ----- Auth routes -----
@@ -582,6 +582,81 @@ async def export_allocation(run_id: str, current=Depends(get_current_user)):
         iter([output.read()]),
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="allocation-{run["name"]}.csv"'},
+    )
+
+
+@api.get("/allocations/{run_id}/export-xlsx")
+async def export_allocation_xlsx(run_id: str, current=Depends(get_current_user)):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    run = await db.allocation_runs.find_one({"id": run_id, "user_id": current["id"]}, {"_id": 0})
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Allocations"
+
+    hdr_font = Font(bold=True, color="FFFFFF")
+    hdr_fill = PatternFill("solid", fgColor="0F172A")
+    status_fills = {
+        "full": PatternFill("solid", fgColor="DCFCE7"),
+        "partial": PatternFill("solid", fgColor="FEF3C7"),
+        "unmatched": PatternFill("solid", fgColor="FEE2E2"),
+    }
+
+    headers = ["Bank Date", "Bank Reference", "Bank Payer", "Bank Amount", "Status",
+               "Confidence", "Matched Invoices", "Allocated", "Bank Remaining"]
+    for col, h in enumerate(headers, start=1):
+        c = ws.cell(row=1, column=col, value=h)
+        c.font = hdr_font
+        c.fill = hdr_fill
+        c.alignment = Alignment(horizontal="left")
+
+    inv_by_id = {inv["id"]: inv for inv in run["invoice_rows"]}
+    for r_idx, b in enumerate(run["bank_rows"], start=2):
+        nums = ", ".join(inv_by_id[m["invoice_id"]]["number"] for m in b["matches"] if m["invoice_id"] in inv_by_id)
+        allocated = round(sum(m["amount"] for m in b["matches"]), 2)
+        vals = [b.get("date") or "", b.get("reference") or "", b.get("payer") or "",
+                b["amount"], b["status"], b.get("confidence") or "", nums, allocated, b["remaining"]]
+        for c_idx, v in enumerate(vals, start=1):
+            cell = ws.cell(row=r_idx, column=c_idx, value=v)
+            if c_idx in (4, 8, 9):
+                cell.number_format = '£#,##0.00'
+            if status_fills.get(b["status"]):
+                cell.fill = status_fills[b["status"]]
+
+    # column widths
+    widths = [12, 28, 24, 14, 12, 12, 28, 14, 14]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[chr(64 + i)].width = w
+
+    # Invoice sheet
+    ws2 = wb.create_sheet("Invoices")
+    inv_headers = ["Invoice #", "Debtor", "Date", "Amount", "Outstanding", "Status"]
+    for col, h in enumerate(inv_headers, start=1):
+        c = ws2.cell(row=1, column=col, value=h)
+        c.font = hdr_font
+        c.fill = hdr_fill
+    for r_idx, inv in enumerate(run["invoice_rows"], start=2):
+        vals = [inv["number"], inv.get("debtor") or "", inv.get("date") or "",
+                inv["amount"], inv["remaining"], inv["status"]]
+        for c_idx, v in enumerate(vals, start=1):
+            cell = ws2.cell(row=r_idx, column=c_idx, value=v)
+            if c_idx in (4, 5):
+                cell.number_format = '£#,##0.00'
+            if status_fills.get(inv["status"]):
+                cell.fill = status_fills[inv["status"]]
+    for i, w in enumerate([14, 28, 12, 14, 14, 12], start=1):
+        ws2.column_dimensions[chr(64 + i)].width = w
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="allocation-{run["name"]}.xlsx"'},
     )
 
 

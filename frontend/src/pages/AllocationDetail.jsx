@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { api, API_BASE, fmtGBP, formatError } from "@/lib/api";
 import { toast } from "sonner";
-import { ArrowLeft, Download, Link2 } from "lucide-react";
+import { ArrowLeft, Download, Link2, GripVertical, AlertTriangle, FileSpreadsheet } from "lucide-react";
 
 const TABS = [
   { id: "full", label: "Full Match" },
@@ -24,7 +24,8 @@ export default function AllocationDetail() {
   const [run, setRun] = useState(null);
   const [tab, setTab] = useState("full");
   const [audit, setAudit] = useState([]);
-  const [linkDialog, setLinkDialog] = useState(null); // {bankId} or {invoiceId}
+  const [linkDialog, setLinkDialog] = useState(null); // {bankId} or {invoiceId} or {bankId, invoiceId}
+  const [dragSource, setDragSource] = useState(null); // {type: 'bank'|'invoice', id}
 
   const load = async () => {
     try {
@@ -54,8 +55,13 @@ export default function AllocationDetail() {
   }, [run]);
 
   const exportUrl = `${API_BASE}/allocations/${id}/export`;
+  const exportXlsxUrl = `${API_BASE}/allocations/${id}/export-xlsx`;
 
   if (!run) return <div className="text-slate-500" data-testid="loading">Loading…</div>;
+
+  const total = run.stats.total_bank || 0;
+  const unmatchedRate = total > 0 ? Math.round(((run.stats.unmatched_bank || 0) / total) * 100) : 0;
+  const highUnmatched = unmatchedRate >= 30;
 
   return (
     <div data-testid="allocation-detail-page">
@@ -67,11 +73,30 @@ export default function AllocationDetail() {
           <h1 className="font-display font-bold text-3xl tracking-tight">{run.name}</h1>
           <p className="text-slate-500 text-sm mt-1">Period {run.period} · Created {new Date(run.created_at).toLocaleString("en-GB")}</p>
         </div>
-        <a href={exportUrl} download data-testid="export-csv"
-          className="inline-flex items-center gap-2 bg-[#0F172A] text-white font-semibold px-4 py-2.5 rounded-md hover:bg-slate-800 transition-colors">
-          <Download className="h-4 w-4" /> Export CSV
-        </a>
+        <div className="flex items-center gap-2">
+          <a href={exportXlsxUrl} download data-testid="export-xlsx"
+            className="inline-flex items-center gap-2 bg-emerald-600 text-white font-semibold px-4 py-2.5 rounded-md hover:bg-emerald-700 transition-colors">
+            <FileSpreadsheet className="h-4 w-4" /> Export Excel
+          </a>
+          <a href={exportUrl} download data-testid="export-csv"
+            className="inline-flex items-center gap-2 bg-[#0F172A] text-white font-semibold px-4 py-2.5 rounded-md hover:bg-slate-800 transition-colors">
+            <Download className="h-4 w-4" /> Export CSV
+          </a>
+        </div>
       </div>
+
+      {highUnmatched && (
+        <div className="border border-amber-200 bg-amber-50 rounded-md p-4 mb-6 flex items-start gap-3" data-testid="high-unmatched-banner">
+          <AlertTriangle className="h-5 w-5 text-amber-700 mt-0.5 shrink-0" />
+          <div>
+            <div className="font-semibold text-amber-900">High unmatched rate: {unmatchedRate}%</div>
+            <div className="text-sm text-amber-900 mt-1">
+              {run.stats.unmatched_bank} of {total} bank receipts could not be matched automatically.
+              Review the <button onClick={() => setTab("unmatched_bank")} className="font-semibold underline">Unmatched Bank</button> tab and use drag-and-drop or the &ldquo;Link manually&rdquo; button to allocate them.
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-8">
         <Stat label="Total allocated" value={fmtGBP(run.stats.total_allocated)} tone="emerald" testid="stat-total" />
@@ -92,11 +117,20 @@ export default function AllocationDetail() {
         ))}
       </div>
 
-      {(tab === "full" || tab === "partial" || tab === "unmatched_bank") && (
-        <BankTable rows={buckets[tab]} invById={invById} showLink={tab === "unmatched_bank"} onLink={(bankId) => setLinkDialog({ bankId })} />
+      {(tab === "full" || tab === "partial") && (
+        <BankTable rows={buckets[tab]} invById={invById} showLink={false} onLink={() => {}} />
+      )}
+      {tab === "unmatched_bank" && (
+        <UnmatchedSplit run={run} invById={invById}
+          onOpenDialog={(ctx) => setLinkDialog(ctx)}
+          onDrop={async (bankId, invoiceId) => setLinkDialog({ bankId, invoiceId })}
+          dragSource={dragSource} setDragSource={setDragSource} focus="bank" />
       )}
       {tab === "unmatched_invoice" && (
-        <InvoiceTable rows={buckets.unmatched_invoice} onLink={(invoiceId) => setLinkDialog({ invoiceId })} />
+        <UnmatchedSplit run={run} invById={invById}
+          onOpenDialog={(ctx) => setLinkDialog(ctx)}
+          onDrop={async (bankId, invoiceId) => setLinkDialog({ bankId, invoiceId })}
+          dragSource={dragSource} setDragSource={setDragSource} focus="invoice" />
       )}
       {tab === "audit" && <AuditTable logs={audit} />}
 
@@ -308,6 +342,100 @@ function ManualLinkDialog({ run, context, onClose, onLinked }) {
             className="gradient-cta text-white font-semibold px-5 py-2 rounded-md disabled:opacity-50">
             {busy ? "Linking…" : "Confirm link"}
           </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function UnmatchedSplit({ run, invById, onOpenDialog, onDrop, dragSource, setDragSource, focus }) {
+  const unmatchedBank = run.bank_rows.filter((b) => b.status === "unmatched");
+  const unmatchedInv = run.invoice_rows.filter((i) => i.status === "unmatched");
+  const [hover, setHover] = useState(null); // bank-id or invoice-id
+
+  const handleDrop = (target) => {
+    if (!dragSource) return;
+    if (dragSource.type === "bank" && target.type === "invoice") {
+      onDrop(dragSource.id, target.id);
+    } else if (dragSource.type === "invoice" && target.type === "bank") {
+      onDrop(target.id, dragSource.id);
+    }
+    setDragSource(null);
+    setHover(null);
+  };
+
+  return (
+    <div data-testid="unmatched-split">
+      <div className="text-xs text-slate-500 mb-3 flex items-center gap-2">
+        <GripVertical className="h-3.5 w-3.5" /> Drag a row from one panel onto a row in the other to link them. Or use the &ldquo;Link manually&rdquo; button.
+      </div>
+      <div className="grid lg:grid-cols-2 gap-4">
+        <div className={focus === "bank" ? "lg:order-1" : "lg:order-2"}>
+          <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">
+            Unmatched bank receipts ({unmatchedBank.length})
+          </div>
+          {unmatchedBank.length === 0 ? <Empty label="No unmatched bank receipts." /> : (
+            <div className="bg-white border border-slate-200 rounded-md divide-y divide-slate-100" data-testid="dnd-bank-list">
+              {unmatchedBank.map((b) => (
+                <div key={b.id}
+                  draggable
+                  onDragStart={() => setDragSource({ type: "bank", id: b.id })}
+                  onDragEnd={() => setDragSource(null)}
+                  onDragOver={(e) => { if (dragSource?.type === "invoice") { e.preventDefault(); setHover(b.id); } }}
+                  onDragLeave={() => setHover((h) => h === b.id ? null : h)}
+                  onDrop={(e) => { e.preventDefault(); handleDrop({ type: "bank", id: b.id }); }}
+                  className={`flex items-start gap-3 p-3 hover:bg-slate-50 cursor-move ${hover === b.id ? "bg-emerald-50 ring-1 ring-emerald-300" : ""}`}
+                  data-testid={`dnd-bank-${b.id}`}>
+                  <GripVertical className="h-4 w-4 text-slate-300 mt-0.5 shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <div className="font-mono text-xs truncate">{b.reference || "(no reference)"}</div>
+                    <div className="text-xs text-slate-500 truncate">{b.payer || "—"} · {b.date || "no date"}</div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <div className="text-sm font-semibold tabular-nums">{fmtGBP(b.remaining)}</div>
+                    <button onClick={() => onOpenDialog({ bankId: b.id })} data-testid={`link-bank-${b.id}`}
+                      className="text-[10px] font-semibold text-emerald-700 hover:text-emerald-900 px-2 py-1 rounded hover:bg-emerald-50">
+                      Link
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className={focus === "bank" ? "lg:order-2" : "lg:order-1"}>
+          <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">
+            Unmatched invoices ({unmatchedInv.length})
+          </div>
+          {unmatchedInv.length === 0 ? <Empty label="No unmatched invoices." /> : (
+            <div className="bg-white border border-slate-200 rounded-md divide-y divide-slate-100" data-testid="dnd-invoice-list">
+              {unmatchedInv.map((i) => (
+                <div key={i.id}
+                  draggable
+                  onDragStart={() => setDragSource({ type: "invoice", id: i.id })}
+                  onDragEnd={() => setDragSource(null)}
+                  onDragOver={(e) => { if (dragSource?.type === "bank") { e.preventDefault(); setHover(i.id); } }}
+                  onDragLeave={() => setHover((h) => h === i.id ? null : h)}
+                  onDrop={(e) => { e.preventDefault(); handleDrop({ type: "invoice", id: i.id }); }}
+                  className={`flex items-start gap-3 p-3 hover:bg-slate-50 cursor-move ${hover === i.id ? "bg-emerald-50 ring-1 ring-emerald-300" : ""}`}
+                  data-testid={`dnd-invoice-${i.id}`}>
+                  <GripVertical className="h-4 w-4 text-slate-300 mt-0.5 shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <div className="font-mono text-xs truncate">{i.number}</div>
+                    <div className="text-xs text-slate-500 truncate">{i.debtor || "—"} · {i.date || "no date"}</div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <div className="text-sm font-semibold tabular-nums text-rose-700">{fmtGBP(i.remaining)}</div>
+                    <button onClick={() => onOpenDialog({ invoiceId: i.id })} data-testid={`link-invoice-${i.id}`}
+                      className="text-[10px] font-semibold text-emerald-700 hover:text-emerald-900 px-2 py-1 rounded hover:bg-emerald-50">
+                      Link
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>

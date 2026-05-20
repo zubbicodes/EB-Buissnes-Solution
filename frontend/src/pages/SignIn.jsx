@@ -31,7 +31,7 @@ export default function SignIn() {
             <div className="h-10 w-10 rounded-md bg-gradient-to-br from-emerald-500 to-blue-600" />
             <div>
               <div className="font-display font-bold">EB Business Solutions</div>
-              <div className="text-xs uppercase tracking-[0.2em] text-slate-400">Cash Allocator</div>
+              <div className="text-xs uppercase tracking-[0.2em] text-slate-400">Receivables Reconciliation</div>
             </div>
           </Link>
           <div>
@@ -49,7 +49,7 @@ export default function SignIn() {
         <div className="w-full max-w-md">
           <Link to="/" className="lg:hidden flex items-center gap-2 mb-8" data-testid="auth-home-link-mobile">
             <Building2 className="h-6 w-6 text-emerald-600" />
-            <span className="font-display font-bold">EB Cash Allocator</span>
+            <span className="font-display font-bold">EB Receivables</span>
           </Link>
           <h1 className="font-display font-bold text-3xl">Sign in</h1>
           <p className="text-slate-500 mt-2 text-sm">

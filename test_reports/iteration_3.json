@@ -1,0 +1,35 @@
+{
+  "summary": "Iteration 3 — Tested 6 items: auto-detect bug fix, xlsx export, drag-and-drop, high-unmatched banner, rebrand, regression. Backend 14/14 PASS (incl. new test_export_xlsx). Frontend: 5/6 features working, BUT the primary user-reported bug (auto-detect on CSV text change) is NOT FIXED — the debounced useEffect described in the review request is entirely missing from NewAllocation.jsx.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "NewAllocation wizard (step 3)",
+        "issue": "CRITICAL: Auto-detect on CSV change NOT IMPLEMENTED. The review request says a debounced useEffect should watch bankCsv/invCsv and auto-fill mapping selects. In /app/frontend/src/pages/NewAllocation.jsx useEffect is imported but NEVER USED — detectHeaders only runs when the user clicks the 'Auto-detect' button. Reproduced: pasted invoice sample on step 3, waited 1500ms, all five required map-* selects (map-bank_reference, map-bank_amount, map-invoice_number, map-invoice_debtor, map-invoice_amount) remained empty (value=''). The previously reported user complaint 'column mapping at the bottom does nothing' is therefore still present unless the user notices and clicks the small grey 'Auto-detect' button. Headers preview ('HEADERS: InvoiceNumber, Debtor, Amount, Date') does render, confirming the textarea state updates — only the auto-trigger is missing.",
+        "selector": "[data-testid='map-invoice_number']",
+        "priority": "CRITICAL"
+      }
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/test_backend.py", "/app/test_reports/pytest/results.xml"],
+  "action_items": [
+    "FIX: In /app/frontend/src/pages/NewAllocation.jsx add a debounced useEffect that watches [bankCsv, invCsv] and calls detectHeaders() after ~400ms of inactivity. Example:\n\n  useEffect(() => {\n    if (!bankCsv.trim() && !invCsv.trim()) return;\n    const t = setTimeout(() => { detectHeaders(); }, 400);\n    return () => clearTimeout(t);\n  }, [bankCsv, invCsv]);\n\nAlternatively trigger on each individual textarea change. The detectHeaders function itself works correctly (verified by clicking the manual Auto-detect button — selects populated immediately)."
+  ],
+  "critical_code_review_comments": [
+    "NewAllocation.jsx line 1 imports useEffect but never uses it — likely vestige of a removed/incomplete fix. ESLint with eslint-plugin-react-hooks would flag unused imports.",
+    "detectHeaders state setter for `loading` is shared with `validate()` and `submit()` — concurrent invocations possible if auto-detect fires while user clicks Continue; consider a dedicated `detecting` flag.",
+    "NewAllocation.jsx: SAMPLE_BANK and SAMPLE_INV constants are 6KB of hardcoded text inside a 354-line page file. Consider moving to /app/frontend/src/data/samples.js for reuse and to keep page <300 lines.",
+    "AllocationDetail.jsx UnmatchedSplit: drag handlers re-use single `dragSource` state at the parent — works, but moving DnD state into UnmatchedSplit (or using a small reducer) would avoid prop-drilling.",
+    "AllocationDetail.jsx is now 451 lines with 5 sub-components; close to the 700-line file-size guideline but consider splitting BankTable / InvoiceTable / AuditTable / ManualLinkDialog / UnmatchedSplit into separate files before adding more features."
+  ],
+  "updated_files": ["/app/backend/tests/test_backend.py (added test_export_xlsx)"],
+  "success_rate": {"backend": "100% (14/14)", "frontend": "83% (5/6 features) — auto-detect bug fix missing"},
+  "test_credentials": "admin@ebbusiness.com / Admin@2026!",
+  "seed_data_creation": "Re-used iteration_2 run 'TEST_Run_116995.187' for AllocationDetail verification; no new runs created this iteration.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "VERIFIED PASSES this iteration: (1) Backend export-xlsx returns 6KB+ xlsx with PK magic header and openxml content-type — test_export_xlsx PASS. (2) Export Excel button visible on AllocationDetail (data-testid='export-xlsx'), href = {API_BASE}/allocations/{id}/export-xlsx. (3) Drag-and-drop fully functional: programmatic Playwright drag_and_drop from dnd-bank-{id} onto dnd-invoice-{id} opened ManualLinkDialog with bank/invoice/amount=75.00 prefilled. Individual rows have draggable=true; GripVertical handles render. (4) High-unmatched banner correctly hidden when rate<30% (1/5=20%); banner code path verified by reading source (>=30% trigger). Could not exercise the >=30% path with current seed data; main agent can verify by creating a run with mostly unmatched bank rows. (5) Rebrand verified: page title 'EB Receivables Reconciliation Platform', sidebar 'Receivables Reconciliation / EB BUSINESS SOLUTIONS', no 'Cash Allocator' references. Landing/SignIn/SignUp also rebranded. (6) Regression PASS: login, dashboard, wizard end-to-end (when Auto-detect button clicked), AllocationDetail tabs, Export CSV, Manual Link, Compare, Debtors, Audit, Sign out all working from iteration_2. FAILING: auto-detect on CSV change (see action_items).",
+  "rca of the issue": "Root cause: The fix described in the review request (useEffect with 400ms debounce watching bankCsv/invCsv) was never written to /app/frontend/src/pages/NewAllocation.jsx. The file imports `useEffect` on line 1 but the component body (lines 36-94) contains zero useEffect calls. The only auto-detect path is the manual button onClick at line 165. Reproduction: 1) login, 2) /allocations/new, 3) fill name+period→Next, 4) click bank-csv-sample→Next, 5) click invoice-csv-sample, 6) wait 2s, 7) inspect [data-testid='map-invoice_number'].value → empty string. Mitigation: add useEffect with setTimeout/clearTimeout debouncing (snippet in action_items)."
+}

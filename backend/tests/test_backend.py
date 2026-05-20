@@ -84,6 +84,15 @@ def test_export(s1, run_id):
     assert "text/csv" in r.headers.get("content-type","")
     assert "Bank Date" in r.text
 
+def test_export_xlsx(s1, run_id):
+    r = s1.get(f"{API}/allocations/{run_id}/export-xlsx")
+    assert r.status_code == 200
+    ct = r.headers.get("content-type", "")
+    assert "spreadsheetml" in ct or "officedocument" in ct, f"unexpected content-type: {ct}"
+    # xlsx magic header is "PK\x03\x04"
+    assert r.content[:4] == b"PK\x03\x04"
+    assert len(r.content) > 2000
+
 def test_manual_link(s1, run_id):
     run = s1.get(f"{API}/allocations/{run_id}").json()
     bu = next((b for b in run["bank_rows"] if b["status"]=="unmatched"), None)
