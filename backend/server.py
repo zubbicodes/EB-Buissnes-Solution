@@ -126,6 +126,9 @@ class ManualLinkIn(BaseModel):
 def parse_csv(text: str) -> List[Dict[str, str]]:
     if not text or not text.strip():
         return []
+    # Strip BOM that some Excel exports prepend
+    if text.startswith("\ufeff"):
+        text = text[1:]
     reader = csv.DictReader(io.StringIO(text))
     rows = []
     for r in reader:

@@ -56,23 +56,36 @@ export default function NewAllocation() {
       const { data } = await api.post("/allocations/preview-headers", { bank_csv: bankCsv, invoice_csv: invCsv });
       setBankHeaders(data.bank_headers || []);
       setInvHeaders(data.invoice_headers || []);
-      // Best-effort default mapping — only fill keys that aren't already set
-      const guess = (headers, candidates) =>
-        headers.find((h) => candidates.some((c) => h.toLowerCase().includes(c))) || "";
+      // Normalize for robust matching: lowercase + strip non-alphanumerics
+      const norm = (s) => (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+      const guess = (headers, candidates) => {
+        const nc = candidates.map(norm);
+        // 1st pass: exact normalized equality
+        for (const h of headers) { const hn = norm(h); if (nc.includes(hn)) return h; }
+        // 2nd pass: header contains a candidate
+        for (const h of headers) { const hn = norm(h); if (nc.some((c) => hn.includes(c))) return h; }
+        // 3rd pass: a candidate contains the header (header is short, e.g. "no" for "number")
+        for (const h of headers) { const hn = norm(h); if (nc.some((c) => c.includes(hn) && hn.length >= 2)) return h; }
+        return "";
+      };
+      const bh = data.bank_headers || [];
+      const ih = data.invoice_headers || [];
       setMapping((prev) => ({
-        bank_date: prev.bank_date || guess(data.bank_headers || [], ["transaction_date", "date"]),
-        bank_reference: prev.bank_reference || guess(data.bank_headers || [], ["reference_text", "reference", "ref", "desc", "narrative"]),
-        bank_payer: prev.bank_payer || guess(data.bank_headers || [], ["payer", "party", "counter"]),
-        bank_amount: prev.bank_amount || guess(data.bank_headers || [], ["amount", "credit", "value"]),
-        bank_account: prev.bank_account || guess(data.bank_headers || [], ["bank_account", "account"]),
-        bank_transaction_type: prev.bank_transaction_type || guess(data.bank_headers || [], ["transaction_type", "type"]),
-        invoice_number: prev.invoice_number || guess(data.invoice_headers || [], ["invoice_number", "invoice", "number", "no"]),
-        invoice_debtor: prev.invoice_debtor || guess(data.invoice_headers || [], ["debtor_name", "debtor", "customer", "client", "name"]),
-        invoice_amount: prev.invoice_amount || guess(data.invoice_headers || [], ["invoice_amount", "amount", "total", "value"]),
-        invoice_date: prev.invoice_date || guess(data.invoice_headers || [], ["invoice_date", "date"]),
-        invoice_outstanding: prev.invoice_outstanding || guess(data.invoice_headers || [], ["outstanding", "balance", "due"]),
-        invoice_due_date: prev.invoice_due_date || guess(data.invoice_headers || [], ["due_date", "due"]),
-        invoice_customer_reference: prev.invoice_customer_reference || guess(data.invoice_headers || [], ["customer_reference", "cust_ref"]),
+        // Bank
+        bank_date: prev.bank_date || guess(bh, ["transactiondate", "valuedate", "postingdate", "posteddate", "trandate", "txndate", "date"]),
+        bank_reference: prev.bank_reference || guess(bh, ["referencetext", "transactionreference", "paymentreference", "reference", "ref", "details", "description", "narrative", "narration", "memo", "particulars", "notes"]),
+        bank_payer: prev.bank_payer || guess(bh, ["payer", "counterparty", "remitter", "sender", "fromparty", "originator", "name", "party", "from"]),
+        bank_amount: prev.bank_amount || guess(bh, ["amount", "moneyin", "credit", "deposit", "value", "net", "received", "paid"]),
+        bank_account: prev.bank_account || guess(bh, ["bankaccount", "accountnumber", "iban", "sortcode", "account"]),
+        bank_transaction_type: prev.bank_transaction_type || guess(bh, ["transactiontype", "txntype", "type", "category"]),
+        // Invoice
+        invoice_number: prev.invoice_number || guess(ih, ["invoicenumber", "invoiceno", "invoice", "documentnumber", "docnumber", "docno", "documentno", "ref", "reference", "transactionid", "number", "no"]),
+        invoice_debtor: prev.invoice_debtor || guess(ih, ["debtorname", "debtor", "customername", "customer", "clientname", "client", "accountname", "account", "company", "party", "name"]),
+        invoice_amount: prev.invoice_amount || guess(ih, ["invoiceamount", "amount", "grossamount", "total", "value", "balance", "outstanding", "open", "owed", "due"]),
+        invoice_date: prev.invoice_date || guess(ih, ["invoicedate", "documentdate", "docdate", "transactiondate", "issuedate", "date"]),
+        invoice_outstanding: prev.invoice_outstanding || guess(ih, ["outstandingamount", "outstanding", "balance", "remaining", "openamount", "open", "amountdue", "owed", "due"]),
+        invoice_due_date: prev.invoice_due_date || guess(ih, ["duedate", "due", "paymentdue", "maturity"]),
+        invoice_customer_reference: prev.invoice_customer_reference || guess(ih, ["customerreference", "custref", "poreference", "po", "yourref"]),
       }));
     } catch (e) { if (!silent) toast.error(formatError(e)); }
     if (!silent) setLoading(false);
@@ -338,29 +351,45 @@ function CsvStep({ title, description, value, setValue, sample, testid }) {
 }
 
 function MappingGroup({ title, fields, headers, mapping, setMapping }) {
+  const filledCount = fields.filter(([k, , req]) => req).filter(([k]) => mapping[k]).length;
+  const reqCount = fields.filter(([, , req]) => req).length;
   return (
     <div>
-      <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 mb-3">{title}</div>
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">{title}</div>
+        {headers.length > 0 && (
+          <div className={`text-xs font-semibold ${filledCount === reqCount ? "text-emerald-700" : "text-amber-700"}`}>
+            {filledCount}/{reqCount} required mapped
+          </div>
+        )}
+      </div>
       {headers.length === 0 ? (
         <div className="text-xs text-slate-400 border border-dashed border-slate-200 rounded-md p-4">
           Paste or upload a CSV above to populate column options.
         </div>
       ) : null}
       <div className="space-y-3">
-        {fields.map(([key, label, required]) => (
-          <div key={key} className="flex items-center gap-3">
-            <label className="text-sm text-slate-700 w-44">
-              {label} {required && <span className="text-rose-500">*</span>}
-            </label>
-            <select value={mapping[key] || ""} onChange={(e) => setMapping((m) => ({ ...m, [key]: e.target.value }))}
-              disabled={headers.length === 0}
-              className="flex-1 border border-slate-200 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30 disabled:bg-slate-50 disabled:text-slate-400"
-              data-testid={`map-${key}`}>
-              <option value="">— Select column —</option>
-              {headers.map((h) => <option key={h} value={h}>{h}</option>)}
-            </select>
-          </div>
-        ))}
+        {fields.map(([key, label, required]) => {
+          const filled = !!mapping[key];
+          return (
+            <div key={key} className="flex items-center gap-3">
+              <label className="text-sm text-slate-700 w-44 flex items-center gap-1.5">
+                {filled && <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500" />}
+                {!filled && required && <span className="inline-block w-1.5 h-1.5 rounded-full bg-rose-500" />}
+                {label} {required && <span className="text-rose-500">*</span>}
+              </label>
+              <select value={mapping[key] || ""} onChange={(e) => setMapping((m) => ({ ...m, [key]: e.target.value }))}
+                disabled={headers.length === 0}
+                className={`flex-1 border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30 disabled:bg-slate-50 disabled:text-slate-400 ${
+                  filled ? "border-emerald-300 bg-emerald-50/40" : "border-slate-200"
+                }`}
+                data-testid={`map-${key}`}>
+                <option value="">— Select column —</option>
+                {headers.map((h) => <option key={h} value={h}>{h}</option>)}
+              </select>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

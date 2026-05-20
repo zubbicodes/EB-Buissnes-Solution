@@ -1,0 +1,43 @@
+{
+  "summary": "Verified the auto-detect bug fix for real-world finance CSV headers on the New Allocation wizard. All 5 REQUIRED column mappings now auto-fill correctly with user's exact headers (Bank: Date,Amount,Reference,Narrative / Invoice: Ref,Name:,Balance,Date). Visual indicators (green/red dots + counters) work as designed. Full end-to-end allocation completed successfully with 1 reference match.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/test_reports/iteration_6.json"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "detectHeaders() 3-pass normalized matcher in NewAllocation.jsx lines 53-92 works correctly. Normalization (lowercase + strip non-alphanumerics) handles 'Name:' colon, and expanded candidate lists cover 'Ref'/'Balance' which were the original failure points.",
+    "MappingGroup counter+dot UI (lines 353-396) renders correctly: 2/2 bank required mapped + 3/3 invoice required mapped, with 10 green dots and 0 red dots for the test inputs.",
+    "Note: 'Narrative' did NOT map to bank_payer because the 2nd pass requires header.contains(candidate) but 'narrative' (norm) is not contained in any of [payer, counterparty, remitter, sender, fromparty, originator, name, party, from]. This is acceptable per the request (bank_payer is optional). If desired, add 'narrative'/'narration'/'description' to bank_payer candidates as a future minor enhancement."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "N/A (frontend-only retest)", "frontend": "100%"},
+  "test_credentials": "admin@ebbusiness.com / Admin@2026! (worked)",
+  "seed_data_creation": "Created one test allocation 'TEST Auto-detect Real Headers' (period 2026-01) via wizard with the user's exact headers; resulted in 1 fully-matched row (INV-1001 £1,200.00). ID: 49f589a3-4f7f-4aba-8197-986095a9f70a",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Login route is /signin (not /login). Testids: signin-email, signin-password, signin-submit. New allocation page /new with testids: run-name-input, run-period-input, wizard-next, wizard-back, bank-csv-textarea, invoice-csv-textarea (both hidden inside <details><summary>Or paste raw CSV text</summary> — must click summary first), bank-csv-sample, invoice-csv-sample, map-{field} for all mapping selects, validate-button, validation-report. Sample CSV buttons load DIFFERENT headers than user's real ones (Date,Reference,Payer,Amount) — use textarea paste for testing real header detection.",
+  "verification_details": {
+    "required_mappings_all_pass": true,
+    "map-bank_reference": "Reference (PASS)",
+    "map-bank_amount": "Amount (PASS)",
+    "map-invoice_number": "Ref (PASS — was broken before fix)",
+    "map-invoice_debtor": "Name: (PASS — colon handled via normalization)",
+    "map-invoice_amount": "Balance (PASS — was broken before fix)",
+    "optional_map-bank_date": "Date (matched)",
+    "optional_map-bank_payer": "empty (acceptable per request — Narrative not in payer candidates)",
+    "optional_map-invoice_date": "Date (matched)",
+    "optional_map-invoice_outstanding": "Balance (matched)",
+    "counters_displayed": ["2/2 required mapped", "3/3 required mapped"],
+    "green_dots_count": 10,
+    "red_dots_count": 0,
+    "wizard_next_enabled_after_mapping": true,
+    "validation_report_clean": "0 errors, 0 warnings, 100% coverage on all mapped columns",
+    "end_to_end_allocation": "SUCCESS — toast 'Allocation complete' + redirected to /allocations/{id}, 1 fully matched row by reference INV-1001 (£1,200.00, high confidence)"
+  }
+}
