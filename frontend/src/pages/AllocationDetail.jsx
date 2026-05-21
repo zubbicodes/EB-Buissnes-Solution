@@ -1,8 +1,8 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState, useCallback } from "react";
 import { useParams, Link } from "react-router-dom";
 import { api, API_BASE, fmtGBP, formatError } from "@/lib/api";
 import { toast } from "sonner";
-import { ArrowLeft, Download, Link2, GripVertical, AlertTriangle, FileSpreadsheet } from "lucide-react";
+import { ArrowLeft, Download, Link2, GripVertical, AlertTriangle, FileSpreadsheet, ChevronLeft, ChevronRight, Search } from "lucide-react";
 
 const TABS = [
   { id: "full", label: "Confirmed" },
@@ -19,52 +19,69 @@ const CONF_COLOUR = {
   manual: "bg-blue-100 text-blue-800 border-blue-200",
 };
 
+const PAGE_SIZE = 50;
+
 export default function AllocationDetail() {
   const { id } = useParams();
   const [run, setRun] = useState(null);
   const [tab, setTab] = useState("full");
   const [audit, setAudit] = useState([]);
-  const [linkDialog, setLinkDialog] = useState(null); // {bankId} or {invoiceId} or {bankId, invoiceId}
-  const [dragSource, setDragSource] = useState(null); // {type: 'bank'|'invoice', id}
+  const [linkDialog, setLinkDialog] = useState(null);
 
-  const load = async () => {
+  // Tab-bound paginated data
+  const [tabData, setTabData] = useState({ rows: [], page: 1, total: 0 });
+  const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
+  const [tabLoading, setTabLoading] = useState(false);
+
+  const loadHeader = useCallback(async () => {
     try {
       const { data } = await api.get(`/allocations/${id}`);
       setRun(data);
       return data;
     } catch (e) { toast.error(formatError(e)); }
-  };
-  const loadAudit = async () => {
+  }, [id]);
+
+  useEffect(() => { loadHeader(); }, [loadHeader]);
+
+  // Poll while processing
+  useEffect(() => {
+    if (run?.status !== "processing") return;
+    const t = setInterval(async () => {
+      const d = await loadHeader();
+      if (d?.status !== "processing") clearInterval(t);
+    }, 2000);
+    return () => clearInterval(t);
+  }, [run?.status, loadHeader]);
+
+  const loadAudit = useCallback(async () => {
     try {
       const { data } = await api.get(`/audit`, { params: { run_id: id } });
       setAudit(data.logs || []);
     } catch (e) { toast.error(formatError(e)); }
-  };
-  useEffect(() => { load(); }, [id]);
-  useEffect(() => { if (tab === "audit") loadAudit(); }, [tab]);
+  }, [id]);
 
-  // Poll while run is still processing
+  const loadTab = useCallback(async (bucket, p = 1, q = "") => {
+    if (bucket === "audit") { await loadAudit(); return; }
+    setTabLoading(true);
+    try {
+      const { data } = await api.get(`/allocations/${id}/rows`, {
+        params: { bucket, page: p, page_size: PAGE_SIZE, search: q },
+      });
+      setTabData({ rows: data.rows || [], page: data.page, total: data.total });
+    } catch (e) { toast.error(formatError(e)); }
+    finally { setTabLoading(false); }
+  }, [id, loadAudit]);
+
+  // Reload tab when tab/search/page changes (debounce search)
   useEffect(() => {
-    if (run?.status !== "processing") return;
-    const t = setInterval(async () => {
-      const d = await load();
-      if (d?.status !== "processing") clearInterval(t);
-    }, 2000);
-    return () => clearInterval(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [run?.status]);
+    if (!run || run.status !== "done") return;
+    const t = setTimeout(() => { loadTab(tab, page, search); }, search ? 350 : 0);
+    return () => clearTimeout(t);
+  }, [tab, page, search, run?.status, loadTab]); // eslint-disable-line
 
-  const invById = useMemo(() => Object.fromEntries((run?.invoice_rows || []).map((i) => [i.id, i])), [run]);
-
-  const buckets = useMemo(() => {
-    if (!run) return { full: [], partial: [], unmatched_bank: [], unmatched_invoice: [] };
-    return {
-      full: run.bank_rows.filter((b) => b.status === "full"),
-      partial: run.bank_rows.filter((b) => b.status === "partial"),
-      unmatched_bank: run.bank_rows.filter((b) => b.status === "unmatched"),
-      unmatched_invoice: run.invoice_rows.filter((i) => i.status === "unmatched"),
-    };
-  }, [run]);
+  // Reset page when changing tab/search
+  useEffect(() => { setPage(1); }, [tab, search]);
 
   const exportUrl = `${API_BASE}/allocations/${id}/export`;
   const exportXlsxUrl = `${API_BASE}/allocations/${id}/export-xlsx`;
@@ -106,6 +123,13 @@ export default function AllocationDetail() {
   const unmatchedRate = total > 0 ? Math.round(((run.stats.unmatched_bank || 0) / total) * 100) : 0;
   const highUnmatched = unmatchedRate >= 30;
 
+  const onManualLinked = async () => {
+    setLinkDialog(null);
+    await loadHeader();
+    await loadTab(tab, page, search);
+    toast.success("Link saved");
+  };
+
   return (
     <div data-testid="allocation-detail-page">
       <Link to="/dashboard" className="inline-flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-900 mb-3" data-testid="back-to-dashboard">
@@ -135,7 +159,7 @@ export default function AllocationDetail() {
             <div className="font-semibold text-amber-900">High unmatched rate: {unmatchedRate}%</div>
             <div className="text-sm text-amber-900 mt-1">
               {run.stats.unmatched_bank} of {total} bank receipts could not be matched automatically.
-              Review the <button onClick={() => setTab("unmatched_bank")} className="font-semibold underline">Unmatched Bank</button> tab and use drag-and-drop or the &ldquo;Link manually&rdquo; button to allocate them.
+              Review the <button onClick={() => setTab("unmatched_bank")} className="font-semibold underline">Unmatched Bank</button> tab.
             </div>
           </div>
         </div>
@@ -160,29 +184,45 @@ export default function AllocationDetail() {
         ))}
       </div>
 
+      {tab !== "audit" && (
+        <div className="flex items-center justify-between mb-3 gap-3">
+          <div className="relative flex-1 max-w-md">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder={tab === "unmatched_invoice" ? "Search by invoice # or debtor…" : "Search by reference, payer, or invoice #…"}
+              className="w-full border border-slate-200 rounded-md pl-9 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
+              data-testid="rows-search"
+            />
+          </div>
+          <div className="text-xs text-slate-500">
+            {tabLoading ? "Loading…" : `${tabData.total.toLocaleString("en-GB")} rows`}
+          </div>
+        </div>
+      )}
+
       {(tab === "full" || tab === "partial") && (
-        <BankTable rows={buckets[tab]} invById={invById} showLink={false} onLink={() => {}} />
+        <BankTable rows={tabData.rows} showLink={false} />
       )}
       {tab === "unmatched_bank" && (
-        <UnmatchedSplit run={run} invById={invById}
-          onOpenDialog={(ctx) => setLinkDialog(ctx)}
-          onDrop={async (bankId, invoiceId) => setLinkDialog({ bankId, invoiceId })}
-          dragSource={dragSource} setDragSource={setDragSource} focus="bank" />
+        <BankTable rows={tabData.rows} showLink={true} onLink={(bankId) => setLinkDialog({ bankId })} />
       )}
       {tab === "unmatched_invoice" && (
-        <UnmatchedSplit run={run} invById={invById}
-          onOpenDialog={(ctx) => setLinkDialog(ctx)}
-          onDrop={async (bankId, invoiceId) => setLinkDialog({ bankId, invoiceId })}
-          dragSource={dragSource} setDragSource={setDragSource} focus="invoice" />
+        <InvoiceTable rows={tabData.rows} onLink={(invoiceId) => setLinkDialog({ invoiceId })} />
       )}
       {tab === "audit" && <AuditTable logs={audit} />}
 
+      {tab !== "audit" && tabData.total > PAGE_SIZE && (
+        <Pagination page={page} total={tabData.total} pageSize={PAGE_SIZE} onChange={setPage} />
+      )}
+
       {linkDialog && (
         <ManualLinkDialog
-          run={run}
+          runId={id}
           context={linkDialog}
           onClose={() => setLinkDialog(null)}
-          onLinked={async () => { setLinkDialog(null); await load(); if (tab === "audit") loadAudit(); toast.success("Link saved"); }}
+          onLinked={onManualLinked}
         />
       )}
     </div>
@@ -203,7 +243,29 @@ function Stat({ label, value, tone, testid }) {
   );
 }
 
-function BankTable({ rows, invById, showLink, onLink }) {
+function Pagination({ page, total, pageSize, onChange }) {
+  const pages = Math.ceil(total / pageSize);
+  const start = (page - 1) * pageSize + 1;
+  const end = Math.min(page * pageSize, total);
+  return (
+    <div className="flex items-center justify-between mt-4 text-sm" data-testid="pagination">
+      <div className="text-slate-500">Showing {start.toLocaleString("en-GB")}–{end.toLocaleString("en-GB")} of {total.toLocaleString("en-GB")}</div>
+      <div className="flex items-center gap-1">
+        <button onClick={() => onChange(Math.max(1, page - 1))} disabled={page === 1} data-testid="page-prev"
+          className="px-2 py-1.5 rounded border border-slate-200 disabled:opacity-40 hover:bg-slate-50">
+          <ChevronLeft className="h-4 w-4" />
+        </button>
+        <span className="px-3 py-1.5 text-slate-700 font-medium">{page} / {pages}</span>
+        <button onClick={() => onChange(Math.min(pages, page + 1))} disabled={page >= pages} data-testid="page-next"
+          className="px-2 py-1.5 rounded border border-slate-200 disabled:opacity-40 hover:bg-slate-50">
+          <ChevronRight className="h-4 w-4" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function BankTable({ rows, showLink, onLink }) {
   if (rows.length === 0) return <Empty label="No rows in this bucket." />;
   return (
     <div className="bg-white border border-slate-200 rounded-md overflow-hidden" data-testid="bank-table">
@@ -218,8 +280,8 @@ function BankTable({ rows, invById, showLink, onLink }) {
         </thead>
         <tbody>
           {rows.map((b) => {
-            const allocated = b.matches.reduce((s, m) => s + m.amount, 0);
-            const hasAmbiguous = b.matches.some((m) => m.ambiguous);
+            const allocated = (b.matches || []).reduce((s, m) => s + m.amount, 0);
+            const hasAmbiguous = (b.matches || []).some((m) => m.ambiguous);
             const lowConfPartial = b.status === "partial" && b.confidence === "low";
             return (
               <tr key={b.id} className="border-t border-slate-100 hover:bg-slate-50/60 align-top">
@@ -230,10 +292,10 @@ function BankTable({ rows, invById, showLink, onLink }) {
                 <td className="px-3 py-2 text-right tabular-nums text-emerald-700">{fmtGBP(allocated)}</td>
                 <td className="px-3 py-2 text-right tabular-nums text-slate-600">{fmtGBP(b.remaining)}</td>
                 <td className="px-3 py-2 text-xs">
-                  {b.matches.length === 0 ? <span className="text-slate-400">—</span> :
+                  {(b.matches || []).length === 0 ? <span className="text-slate-400">—</span> :
                     b.matches.map((m, i) => (
                       <div key={i} className="text-slate-700">
-                        <span className="font-semibold">{invById[m.invoice_id]?.number || "?"}</span>
+                        <span className="font-semibold">{m.invoice_number || "?"}</span>
                         <span className="text-slate-400"> · {fmtGBP(m.amount)} · {m.method}{m.score ? ` ${m.score}%` : ""}</span>
                       </div>
                     ))}
@@ -325,28 +387,48 @@ function AuditTable({ logs }) {
   );
 }
 
-function ManualLinkDialog({ run, context, onClose, onLinked }) {
+function ManualLinkDialog({ runId, context, onClose, onLinked }) {
   const [bankId, setBankId] = useState(context.bankId || "");
   const [invoiceId, setInvoiceId] = useState(context.invoiceId || "");
   const [amount, setAmount] = useState("");
   const [busy, setBusy] = useState(false);
+  const [banks, setBanks] = useState([]);
+  const [invs, setInvs] = useState([]);
+  const [loadingOptions, setLoadingOptions] = useState(false);
 
-  const bank = run.bank_rows.find((b) => b.id === bankId);
-  const inv = run.invoice_rows.find((i) => i.id === invoiceId);
+  // Load eligible banks + invoices (first 200 of each — usually enough; manual linking is for the long tail)
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoadingOptions(true);
+      try {
+        const [b, i] = await Promise.all([
+          api.get(`/allocations/${runId}/rows`, { params: { bucket: "unmatched_bank", page: 1, page_size: 200 } }),
+          api.get(`/allocations/${runId}/rows`, { params: { bucket: "unmatched_invoice", page: 1, page_size: 200 } }),
+        ]);
+        if (!cancelled) {
+          setBanks(b.data.rows || []);
+          setInvs(i.data.rows || []);
+        }
+      } catch (e) { toast.error(formatError(e)); }
+      finally { if (!cancelled) setLoadingOptions(false); }
+    })();
+    return () => { cancelled = true; };
+  }, [runId]);
 
-  const eligibleBanks = run.bank_rows.filter((b) => b.remaining > 0);
-  const eligibleInv = run.invoice_rows.filter((i) => i.remaining > 0);
+  const bank = banks.find((b) => b.id === bankId);
+  const inv = invs.find((i) => i.id === invoiceId);
 
   useEffect(() => {
     if (bank && inv) {
       setAmount(Math.min(bank.remaining, inv.remaining).toFixed(2));
     }
-  }, [bankId, invoiceId]); // eslint-disable-line
+  }, [bankId, invoiceId, bank, inv]);
 
   const submit = async () => {
     setBusy(true);
     try {
-      await api.post(`/allocations/${run.id}/manual-link`, {
+      await api.post(`/allocations/${runId}/manual-link`, {
         bank_row_id: bankId, invoice_row_id: invoiceId, amount: Number(amount),
       });
       onLinked();
@@ -359,35 +441,41 @@ function ManualLinkDialog({ run, context, onClose, onLinked }) {
         <h3 className="font-display font-semibold text-xl">Link bank payment to invoice</h3>
         <p className="text-sm text-slate-500 mt-1">Both selections will be audit-logged.</p>
 
-        <div className="grid md:grid-cols-2 gap-4 mt-6">
-          <div>
-            <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">Bank payment</div>
-            <select value={bankId} onChange={(e) => setBankId(e.target.value)} className="w-full border border-slate-200 rounded-md px-2 py-2 text-sm" data-testid="dialog-bank-select">
-              <option value="">— Select —</option>
-              {eligibleBanks.map((b) => (
-                <option key={b.id} value={b.id}>{b.reference || "(no ref)"} — {fmtGBP(b.remaining)} remaining</option>
-              ))}
-            </select>
-            {bank && <div className="mt-2 text-xs text-slate-600">{bank.payer} · {bank.date || "no date"}</div>}
-          </div>
-          <div>
-            <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">Invoice</div>
-            <select value={invoiceId} onChange={(e) => setInvoiceId(e.target.value)} className="w-full border border-slate-200 rounded-md px-2 py-2 text-sm" data-testid="dialog-invoice-select">
-              <option value="">— Select —</option>
-              {eligibleInv.map((i) => (
-                <option key={i.id} value={i.id}>{i.number} — {i.debtor} — {fmtGBP(i.remaining)} outstanding</option>
-              ))}
-            </select>
-            {inv && <div className="mt-2 text-xs text-slate-600">{inv.debtor}</div>}
-          </div>
-        </div>
+        {loadingOptions ? (
+          <div className="py-10 text-center text-slate-500">Loading unmatched rows…</div>
+        ) : (
+          <>
+            <div className="grid md:grid-cols-2 gap-4 mt-6">
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">Bank payment</div>
+                <select value={bankId} onChange={(e) => setBankId(e.target.value)} className="w-full border border-slate-200 rounded-md px-2 py-2 text-sm" data-testid="dialog-bank-select">
+                  <option value="">— Select —</option>
+                  {banks.map((b) => (
+                    <option key={b.id} value={b.id}>{(b.reference || "(no ref)").slice(0, 40)} — {fmtGBP(b.remaining)} remaining</option>
+                  ))}
+                </select>
+                {bank && <div className="mt-2 text-xs text-slate-600">{bank.payer} · {bank.date || "no date"}</div>}
+              </div>
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">Invoice</div>
+                <select value={invoiceId} onChange={(e) => setInvoiceId(e.target.value)} className="w-full border border-slate-200 rounded-md px-2 py-2 text-sm" data-testid="dialog-invoice-select">
+                  <option value="">— Select —</option>
+                  {invs.map((i) => (
+                    <option key={i.id} value={i.id}>{i.number} — {(i.debtor || "").slice(0, 28)} — {fmtGBP(i.remaining)} outstanding</option>
+                  ))}
+                </select>
+                {inv && <div className="mt-2 text-xs text-slate-600">{inv.debtor}</div>}
+              </div>
+            </div>
 
-        <div className="mt-4">
-          <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">Amount to allocate (£)</div>
-          <input value={amount} onChange={(e) => setAmount(e.target.value)} type="number" step="0.01"
-            className="w-full md:w-60 border border-slate-200 rounded-md px-3 py-2 text-sm"
-            data-testid="dialog-amount" />
-        </div>
+            <div className="mt-4">
+              <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">Amount to allocate (£)</div>
+              <input value={amount} onChange={(e) => setAmount(e.target.value)} type="number" step="0.01"
+                className="w-full md:w-60 border border-slate-200 rounded-md px-3 py-2 text-sm"
+                data-testid="dialog-amount" />
+            </div>
+          </>
+        )}
 
         <div className="flex items-center justify-end gap-2 mt-6">
           <button onClick={onClose} className="px-4 py-2 text-sm font-semibold text-slate-600 hover:text-slate-900" data-testid="dialog-cancel">Cancel</button>
@@ -401,103 +489,10 @@ function ManualLinkDialog({ run, context, onClose, onLinked }) {
   );
 }
 
-function UnmatchedSplit({ run, invById, onOpenDialog, onDrop, dragSource, setDragSource, focus }) {
-  const unmatchedBank = run.bank_rows.filter((b) => b.status === "unmatched");
-  const unmatchedInv = run.invoice_rows.filter((i) => i.status === "unmatched");
-  const [hover, setHover] = useState(null); // bank-id or invoice-id
-
-  const handleDrop = (target) => {
-    if (!dragSource) return;
-    if (dragSource.type === "bank" && target.type === "invoice") {
-      onDrop(dragSource.id, target.id);
-    } else if (dragSource.type === "invoice" && target.type === "bank") {
-      onDrop(target.id, dragSource.id);
-    }
-    setDragSource(null);
-    setHover(null);
-  };
-
-  return (
-    <div data-testid="unmatched-split">
-      <div className="text-xs text-slate-500 mb-3 flex items-center gap-2">
-        <GripVertical className="h-3.5 w-3.5" /> Drag a row from one panel onto a row in the other to link them. Or use the &ldquo;Link manually&rdquo; button.
-      </div>
-      <div className="grid lg:grid-cols-2 gap-4">
-        <div className={focus === "bank" ? "lg:order-1" : "lg:order-2"}>
-          <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">
-            Unmatched bank receipts ({unmatchedBank.length})
-          </div>
-          {unmatchedBank.length === 0 ? <Empty label="No unmatched bank receipts." /> : (
-            <div className="bg-white border border-slate-200 rounded-md divide-y divide-slate-100" data-testid="dnd-bank-list">
-              {unmatchedBank.map((b) => (
-                <div key={b.id}
-                  draggable
-                  onDragStart={() => setDragSource({ type: "bank", id: b.id })}
-                  onDragEnd={() => setDragSource(null)}
-                  onDragOver={(e) => { if (dragSource?.type === "invoice") { e.preventDefault(); setHover(b.id); } }}
-                  onDragLeave={() => setHover((h) => h === b.id ? null : h)}
-                  onDrop={(e) => { e.preventDefault(); handleDrop({ type: "bank", id: b.id }); }}
-                  className={`flex items-start gap-3 p-3 hover:bg-slate-50 cursor-move ${hover === b.id ? "bg-emerald-50 ring-1 ring-emerald-300" : ""}`}
-                  data-testid={`dnd-bank-${b.id}`}>
-                  <GripVertical className="h-4 w-4 text-slate-300 mt-0.5 shrink-0" />
-                  <div className="flex-1 min-w-0">
-                    <div className="font-mono text-xs truncate">{b.reference || "(no reference)"}</div>
-                    <div className="text-xs text-slate-500 truncate">{b.payer || "—"} · {b.date || "no date"}</div>
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    <div className="text-sm font-semibold tabular-nums">{fmtGBP(b.remaining)}</div>
-                    <button onClick={() => onOpenDialog({ bankId: b.id })} data-testid={`link-bank-${b.id}`}
-                      className="text-[10px] font-semibold text-emerald-700 hover:text-emerald-900 px-2 py-1 rounded hover:bg-emerald-50">
-                      Link
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div className={focus === "bank" ? "lg:order-2" : "lg:order-1"}>
-          <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">
-            Unmatched invoices ({unmatchedInv.length})
-          </div>
-          {unmatchedInv.length === 0 ? <Empty label="No unmatched invoices." /> : (
-            <div className="bg-white border border-slate-200 rounded-md divide-y divide-slate-100" data-testid="dnd-invoice-list">
-              {unmatchedInv.map((i) => (
-                <div key={i.id}
-                  draggable
-                  onDragStart={() => setDragSource({ type: "invoice", id: i.id })}
-                  onDragEnd={() => setDragSource(null)}
-                  onDragOver={(e) => { if (dragSource?.type === "bank") { e.preventDefault(); setHover(i.id); } }}
-                  onDragLeave={() => setHover((h) => h === i.id ? null : h)}
-                  onDrop={(e) => { e.preventDefault(); handleDrop({ type: "invoice", id: i.id }); }}
-                  className={`flex items-start gap-3 p-3 hover:bg-slate-50 cursor-move ${hover === i.id ? "bg-emerald-50 ring-1 ring-emerald-300" : ""}`}
-                  data-testid={`dnd-invoice-${i.id}`}>
-                  <GripVertical className="h-4 w-4 text-slate-300 mt-0.5 shrink-0" />
-                  <div className="flex-1 min-w-0">
-                    <div className="font-mono text-xs truncate">{i.number}</div>
-                    <div className="text-xs text-slate-500 truncate">{i.debtor || "—"} · {i.date || "no date"}</div>
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    <div className="text-sm font-semibold tabular-nums text-rose-700">{fmtGBP(i.remaining)}</div>
-                    <button onClick={() => onOpenDialog({ invoiceId: i.id })} data-testid={`link-invoice-${i.id}`}
-                      className="text-[10px] font-semibold text-emerald-700 hover:text-emerald-900 px-2 py-1 rounded hover:bg-emerald-50">
-                      Link
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function Th({ children, right }) {
   return <th className={`px-3 py-2.5 ${right ? "text-right" : "text-left"} font-semibold`}>{children}</th>;
 }
+
 function Empty({ label }) {
   return <div className="border border-dashed border-slate-200 rounded-md py-12 text-center text-sm text-slate-500" data-testid="empty-bucket">{label}</div>;
 }

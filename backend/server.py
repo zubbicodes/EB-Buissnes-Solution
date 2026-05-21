@@ -20,7 +20,8 @@ from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr
-from rapidfuzz import fuzz, utils as rf_utils
+from rapidfuzz import fuzz, process as rf_process, utils as rf_utils
+from collections import defaultdict
 
 
 # ----- DB / Config -----
@@ -364,6 +365,16 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
         if inv["number_norm"]:
             inv_by_norm.setdefault(inv["number_norm"], []).append(inv)
 
+    # Inverted token index: distinctive debtor token -> list of invoice indices.
+    # Used to pre-filter candidates for Pass 2 + Pass 2.5 (huge speedup on large invoice sets).
+    token_index: Dict[str, List[int]] = defaultdict(list)
+    debtor_tokens_cache: List[List[str]] = []
+    for idx, inv in enumerate(invoice_rows):
+        toks = distinctive_tokens(inv["debtor"]) if inv["debtor"] else []
+        debtor_tokens_cache.append(toks)
+        for t in toks:
+            token_index[t].append(idx)
+
     # Pass 1: invoice reference match (FULL-class candidate when fully consumed by reference matches)
     for b in bank_rows:
         if b["remaining"] <= 0:
@@ -373,11 +384,9 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
         seen_ids = set()
         for ref in refs:
             cands = []
-            # exact normalized match
             if ref in inv_by_norm:
                 cands = inv_by_norm[ref]
             else:
-                # try suffix match (last 4+ digits)
                 digits = re.sub(r"\D", "", ref)
                 if len(digits) >= 4:
                     for k, vs in inv_by_norm.items():
@@ -410,9 +419,7 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
             b["matches"].append(link)
             inv["matches"].append(link)
 
-    # Pass 2: fuzzy debtor name suggestion — compare debtor against bank reference text + payer.
-    # Threshold lowered to 70 so we catch suggested-but-uncertain matches as PARTIAL.
-    # Track candidate count to detect ambiguity (multiple plausible invoices for one bank row).
+    # Pass 2: fuzzy debtor name (WRatio, threshold 70). Token pre-filter + rapidfuzz.process.extract.
     for b in bank_rows:
         if b["remaining"] <= 0:
             continue
@@ -420,21 +427,40 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
         compare_text_clean = strip_corp_suffix(compare_text)
         if not compare_text_clean:
             continue
+        # Pre-filter: candidate invoices share at least one distinctive token with bank text
+        bank_text_lc = compare_text.lower()
+        bank_tokens_set = set(distinctive_tokens(compare_text))
+        cand_idx_set = set()
+        for t in bank_tokens_set:
+            cand_idx_set.update(token_index.get(t, ()))
+        if not cand_idx_set:
+            continue
+        candidates = [(i, invoice_rows[i]) for i in cand_idx_set
+                      if invoice_rows[i]["remaining"] > 0 and invoice_rows[i]["debtor"]]
+        if not candidates:
+            continue
+        debtor_cleans = [strip_corp_suffix(c["debtor"]) for _, c in candidates]
+        # rapidfuzz batch extract — C-speed
+        matches = rf_process.extract(
+            compare_text_clean,
+            debtor_cleans,
+            scorer=fuzz.WRatio,
+            processor=rf_utils.default_process,
+            score_cutoff=70,
+            limit=10,
+        )
+        # matches is list of (debtor_clean, score, candidate_index_within_debtor_cleans)
         scored = []
-        for inv in invoice_rows:
-            if inv["remaining"] <= 0 or not inv["debtor"]:
-                continue
-            debtor_clean = strip_corp_suffix(inv["debtor"])
-            if not debtor_clean:
-                continue
-            score = fuzz.WRatio(compare_text_clean, debtor_clean, processor=rf_utils.default_process)
-            if score >= 70:
-                scored.append((score, inv))
+        for _, score, ci in matches:
+            scored.append((score, candidates[ci][1]))
+        # Sort by score desc, then by remaining desc for deterministic allocation
         scored.sort(key=lambda x: (-x[0], -x[1]["remaining"]))
         plausible_count = len(scored)
         for score, inv in scored:
             if b["remaining"] <= 0:
                 break
+            if inv["remaining"] <= 0:
+                continue
             alloc = round(min(b["remaining"], inv["remaining"]), 2)
             if alloc <= 0:
                 continue
@@ -455,32 +481,36 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
             b["matches"].append(link)
             inv["matches"].append(link)
 
-    # Pass 2.5: token-substring fallback for noisy bank text.
-    # If at least 2 distinctive (>=4-char) tokens of an invoice debtor appear verbatim in the
-    # bank text, surface this as a SUGGESTED (PARTIAL) match. Never promotes to FULL.
+    # Pass 2.5: token-substring fallback for noisy bank text. Uses the same inverted index.
     for b in bank_rows:
         if b["remaining"] <= 0:
             continue
         bank_text_lc = " ".join([t for t in [b.get("reference") or "", b.get("payer") or ""] if t]).lower()
         if not bank_text_lc:
             continue
-        # Skip if Pass 2 already linked anything via debtor_name to this bank row
         if any(m["method"] == "debtor_name" for m in b["matches"]):
             continue
+        bank_tokens_set = set(distinctive_tokens(bank_text_lc))
+        if not bank_tokens_set:
+            continue
+        # Count token hits per candidate invoice via inverted index
+        hit_counts: Dict[int, int] = defaultdict(int)
+        for t in bank_tokens_set:
+            for i in token_index.get(t, ()):
+                hit_counts[i] += 1
         scored = []
-        for inv in invoice_rows:
+        already_linked_inv_ids = {m["invoice_id"] for m in b["matches"]}
+        for i, hits in hit_counts.items():
+            if hits < 2:
+                continue
+            inv = invoice_rows[i]
             if inv["remaining"] <= 0 or not inv["debtor"]:
                 continue
-            # don't re-link if already linked via reference
-            if any(m["invoice_id"] == inv["id"] for m in b["matches"]):
+            if inv["id"] in already_linked_inv_ids:
                 continue
-            toks = distinctive_tokens(inv["debtor"])
-            if len(toks) < 2:
-                continue
-            hits = sum(1 for t in toks if t in bank_text_lc)
-            if hits >= 2:
-                score = fuzz.partial_token_set_ratio(bank_text_lc, inv["debtor"].lower())
-                scored.append((score, hits, len(toks), inv))
+            total_toks = len(debtor_tokens_cache[i])
+            score = fuzz.partial_token_set_ratio(bank_text_lc, inv["debtor"].lower())
+            scored.append((score, hits, total_toks, inv))
         scored.sort(key=lambda x: (-x[1], -x[0], -x[3]["remaining"]))
         plausible_count = len(scored)
         for score, hits, total_toks, inv in scored:
@@ -496,7 +526,7 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
                 "invoice_id": inv["id"],
                 "amount": alloc,
                 "method": "debtor_tokens",
-                "confidence": "low",  # token-substring matches never reach high confidence
+                "confidence": "low",
                 "score": round(score, 1),
                 "ambiguous": plausible_count > 1,
                 "reason": f"{hits}/{total_toks} distinctive debtor tokens found in bank text"
@@ -708,6 +738,57 @@ async def write_audit(user_id: str, run_id: Optional[str], action: str, details:
     })
 
 
+# ----- Split-collection storage helpers -----
+# For large runs (e.g. 29k+ invoice rows) we cannot embed everything in the allocation_runs doc
+# because of the 16 MB BSON limit. Bank/invoice rows live in their own collections, scoped by run_id.
+
+CHUNK = 1000  # bulk insert chunk size
+
+async def _bulk_insert_rows(collection, run_id: str, user_id: str, rows: List[Dict[str, Any]]):
+    if not rows:
+        return
+    for start in range(0, len(rows), CHUNK):
+        batch = [{**r, "run_id": run_id, "user_id": user_id} for r in rows[start:start + CHUNK]]
+        await collection.insert_many(batch, ordered=False)
+
+
+async def save_run_rows(run_id: str, user_id: str, bank_rows: List[Dict[str, Any]], invoice_rows: List[Dict[str, Any]]):
+    await _bulk_insert_rows(db.allocation_bank_rows, run_id, user_id, bank_rows)
+    await _bulk_insert_rows(db.allocation_invoice_rows, run_id, user_id, invoice_rows)
+
+
+async def load_all_bank_rows(run_id: str, user_id: str) -> List[Dict[str, Any]]:
+    return await db.allocation_bank_rows.find(
+        {"run_id": run_id, "user_id": user_id}, {"_id": 0, "run_id": 0, "user_id": 0}
+    ).sort("idx", 1).to_list(None)
+
+
+async def load_all_invoice_rows(run_id: str, user_id: str) -> List[Dict[str, Any]]:
+    return await db.allocation_invoice_rows.find(
+        {"run_id": run_id, "user_id": user_id}, {"_id": 0, "run_id": 0, "user_id": 0}
+    ).sort("idx", 1).to_list(None)
+
+
+async def delete_run_rows(run_id: str, user_id: str):
+    await db.allocation_bank_rows.delete_many({"run_id": run_id, "user_id": user_id})
+    await db.allocation_invoice_rows.delete_many({"run_id": run_id, "user_id": user_id})
+
+
+def enrich_matches(bank_rows: List[Dict[str, Any]], invoice_rows: List[Dict[str, Any]]):
+    """Denormalise invoice_number / invoice_debtor into each match for self-contained display + paginated reads."""
+    inv_by_id = {inv["id"]: inv for inv in invoice_rows}
+    for b in bank_rows:
+        for m in b.get("matches", []):
+            inv = inv_by_id.get(m.get("invoice_id"))
+            if inv:
+                m["invoice_number"] = inv.get("number")
+                m["invoice_debtor"] = inv.get("debtor")
+    for inv in invoice_rows:
+        for m in inv.get("matches", []):
+            # noop; bank denormalisation not strictly needed for our UI
+            pass
+
+
 async def _process_run_async(run_id: str, user_id: str, bank_csv: str, invoice_csv: str, mapping_dict: Dict[str, Any]):
     """Background processor for large allocation runs."""
     try:
@@ -715,11 +796,11 @@ async def _process_run_async(run_id: str, user_id: str, bank_csv: str, invoice_c
         bank_raw = parse_csv(bank_csv)
         inv_raw = parse_csv(invoice_csv)
         bank_rows, invoice_rows, stats = run_matching(bank_raw, inv_raw, mapping)
+        enrich_matches(bank_rows, invoice_rows)
+        await save_run_rows(run_id, user_id, bank_rows, invoice_rows)
         await db.allocation_runs.update_one(
             {"id": run_id, "user_id": user_id},
             {"$set": {
-                "bank_rows": bank_rows,
-                "invoice_rows": invoice_rows,
                 "stats": stats,
                 "status": "done",
                 "completed_at": datetime.now(timezone.utc).isoformat(),
@@ -745,7 +826,8 @@ async def create_allocation(payload: AllocationCreate, background: BackgroundTas
 
     bank_row_count = validation.get("bank_row_count", 0)
     invoice_row_count = validation.get("invoice_row_count", 0)
-    is_large = bank_row_count > 5000 or invoice_row_count > 5000
+    # Anything > 2000 on either side runs in the background to keep HTTP fast
+    is_large = bank_row_count > 2000 or invoice_row_count > 2000
 
     run_id = str(uuid.uuid4())
     base_doc = {
@@ -759,8 +841,7 @@ async def create_allocation(payload: AllocationCreate, background: BackgroundTas
     }
 
     if is_large:
-        # Insert pending doc, process in background
-        await db.allocation_runs.insert_one({**base_doc, "bank_rows": [], "invoice_rows": [], "stats": {
+        await db.allocation_runs.insert_one({**base_doc, "stats": {
             "total_bank": bank_row_count, "total_invoices": invoice_row_count,
             "fully_matched": 0, "partially_matched": 0, "unmatched_bank": 0,
             "unmatched_invoices": 0, "total_allocated": 0.0, "total_outstanding": 0.0,
@@ -772,9 +853,11 @@ async def create_allocation(payload: AllocationCreate, background: BackgroundTas
     bank_raw = parse_csv(payload.bank_csv)
     inv_raw = parse_csv(payload.invoice_csv)
     bank_rows, invoice_rows, stats = run_matching(bank_raw, inv_raw, payload.mapping)
+    enrich_matches(bank_rows, invoice_rows)
 
-    doc = {**base_doc, "bank_rows": bank_rows, "invoice_rows": invoice_rows, "stats": stats}
+    doc = {**base_doc, "stats": stats}
     await db.allocation_runs.insert_one(doc)
+    await save_run_rows(run_id, current["id"], bank_rows, invoice_rows)
     await write_audit(current["id"], run_id, "create_run", {
         "name": payload.name, "period": payload.period, "stats": stats,
     })
@@ -793,10 +876,64 @@ async def list_allocations(current=Depends(get_current_user)):
 
 @api.get("/allocations/{run_id}")
 async def get_allocation(run_id: str, current=Depends(get_current_user)):
-    run = await db.allocation_runs.find_one({"id": run_id, "user_id": current["id"]}, {"_id": 0})
+    """Returns the run header (stats + mapping + status), NOT the full row data.
+    Use /allocations/{id}/rows for paginated row data."""
+    run = await db.allocation_runs.find_one(
+        {"id": run_id, "user_id": current["id"]},
+        {"_id": 0, "bank_rows": 0, "invoice_rows": 0},
+    )
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     return run
+
+
+@api.get("/allocations/{run_id}/rows")
+async def get_allocation_rows(
+    run_id: str,
+    bucket: str = "full",
+    page: int = 1,
+    page_size: int = 50,
+    search: str = "",
+    current=Depends(get_current_user),
+):
+    run = await db.allocation_runs.find_one({"id": run_id, "user_id": current["id"]}, {"_id": 0, "id": 1})
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    page = max(1, page)
+    page_size = max(1, min(500, page_size))
+    skip = (page - 1) * page_size
+
+    if bucket in ("full", "partial", "unmatched_bank"):
+        status_map = {"full": "full", "partial": "partial", "unmatched_bank": "unmatched"}
+        q: Dict[str, Any] = {"run_id": run_id, "user_id": current["id"], "status": status_map[bucket]}
+        if search:
+            esc = re.escape(search)
+            q["$or"] = [
+                {"reference": {"$regex": esc, "$options": "i"}},
+                {"payer": {"$regex": esc, "$options": "i"}},
+                {"matches.invoice_number": {"$regex": esc, "$options": "i"}},
+                {"matches.invoice_debtor": {"$regex": esc, "$options": "i"}},
+            ]
+        total = await db.allocation_bank_rows.count_documents(q)
+        rows = await db.allocation_bank_rows.find(
+            q, {"_id": 0, "run_id": 0, "user_id": 0}
+        ).sort("idx", 1).skip(skip).limit(page_size).to_list(page_size)
+    elif bucket == "unmatched_invoice":
+        q = {"run_id": run_id, "user_id": current["id"], "status": "unmatched"}
+        if search:
+            esc = re.escape(search)
+            q["$or"] = [
+                {"number": {"$regex": esc, "$options": "i"}},
+                {"debtor": {"$regex": esc, "$options": "i"}},
+            ]
+        total = await db.allocation_invoice_rows.count_documents(q)
+        rows = await db.allocation_invoice_rows.find(
+            q, {"_id": 0, "run_id": 0, "user_id": 0}
+        ).sort("idx", 1).skip(skip).limit(page_size).to_list(page_size)
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown bucket: {bucket}")
+
+    return {"rows": rows, "page": page, "page_size": page_size, "total": total, "bucket": bucket}
 
 
 @api.delete("/allocations/{run_id}")
@@ -805,6 +942,7 @@ async def delete_allocation(run_id: str, current=Depends(get_current_user)):
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     await db.allocation_runs.delete_one({"id": run_id, "user_id": current["id"]})
+    await delete_run_rows(run_id, current["id"])
     await write_audit(current["id"], run_id, "delete_run", {"name": run.get("name")})
     return {"ok": True}
 
@@ -815,28 +953,35 @@ async def export_allocation(run_id: str, current=Depends(get_current_user)):
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
 
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(["Bank Date", "Bank Reference", "Bank Payer", "Bank Amount (£)",
-                     "Status", "Confidence", "Matched Invoices", "Allocated (£)", "Bank Remaining (£)"])
-    inv_by_id = {inv["id"]: inv for inv in run["invoice_rows"]}
-    for b in run["bank_rows"]:
-        nums = ", ".join(inv_by_id[m["invoice_id"]]["number"] for m in b["matches"] if m["invoice_id"] in inv_by_id)
-        allocated = round(sum(m["amount"] for m in b["matches"]), 2)
-        writer.writerow([
-            b.get("date") or "",
-            b.get("reference") or "",
-            b.get("payer") or "",
-            f"{b['amount']:.2f}",
-            b["status"],
-            b.get("confidence") or "",
-            nums,
-            f"{allocated:.2f}",
-            f"{b['remaining']:.2f}",
-        ])
-    output.seek(0)
+    async def stream():
+        out = io.StringIO()
+        writer = csv.writer(out)
+        writer.writerow(["Bank Date", "Bank Reference", "Bank Payer", "Bank Amount (£)",
+                         "Status", "Confidence", "Why matched?", "Matched Invoices", "Allocated (£)", "Bank Remaining (£)"])
+        yield out.getvalue()
+        async for b in db.allocation_bank_rows.find(
+            {"run_id": run_id, "user_id": current["id"]}, {"_id": 0}
+        ).sort("idx", 1):
+            out = io.StringIO()
+            writer = csv.writer(out)
+            nums = ", ".join((m.get("invoice_number") or "?") for m in b.get("matches", []))
+            allocated = round(sum(m["amount"] for m in b.get("matches", [])), 2)
+            writer.writerow([
+                b.get("date") or "",
+                b.get("reference") or "",
+                b.get("payer") or "",
+                f"{b['amount']:.2f}",
+                b["status"],
+                b.get("confidence") or "",
+                b.get("reason") or "",
+                nums,
+                f"{allocated:.2f}",
+                f"{b['remaining']:.2f}",
+            ])
+            yield out.getvalue()
+
     return StreamingResponse(
-        iter([output.read()]),
+        stream(),
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="allocation-{run["name"]}.csv"'},
     )
@@ -853,7 +998,6 @@ async def export_allocation_xlsx(run_id: str, current=Depends(get_current_user))
     wb = Workbook()
     ws = wb.active
     ws.title = "Allocations"
-
     hdr_font = Font(bold=True, color="FFFFFF")
     hdr_fill = PatternFill("solid", fgColor="0F172A")
     status_fills = {
@@ -861,41 +1005,39 @@ async def export_allocation_xlsx(run_id: str, current=Depends(get_current_user))
         "partial": PatternFill("solid", fgColor="FEF3C7"),
         "unmatched": PatternFill("solid", fgColor="FEE2E2"),
     }
-
     headers = ["Bank Date", "Bank Reference", "Bank Payer", "Bank Amount", "Status",
-               "Confidence", "Matched Invoices", "Allocated", "Bank Remaining"]
+               "Confidence", "Why matched?", "Matched Invoices", "Allocated", "Bank Remaining"]
     for col, h in enumerate(headers, start=1):
         c = ws.cell(row=1, column=col, value=h)
         c.font = hdr_font
         c.fill = hdr_fill
         c.alignment = Alignment(horizontal="left")
 
-    inv_by_id = {inv["id"]: inv for inv in run["invoice_rows"]}
-    for r_idx, b in enumerate(run["bank_rows"], start=2):
-        nums = ", ".join(inv_by_id[m["invoice_id"]]["number"] for m in b["matches"] if m["invoice_id"] in inv_by_id)
-        allocated = round(sum(m["amount"] for m in b["matches"]), 2)
+    r_idx = 2
+    async for b in db.allocation_bank_rows.find({"run_id": run_id, "user_id": current["id"]}, {"_id": 0}).sort("idx", 1):
+        nums = ", ".join((m.get("invoice_number") or "?") for m in b.get("matches", []))
+        allocated = round(sum(m["amount"] for m in b.get("matches", [])), 2)
         vals = [b.get("date") or "", b.get("reference") or "", b.get("payer") or "",
-                b["amount"], b["status"], b.get("confidence") or "", nums, allocated, b["remaining"]]
+                b["amount"], b["status"], b.get("confidence") or "", b.get("reason") or "",
+                nums, allocated, b["remaining"]]
         for c_idx, v in enumerate(vals, start=1):
             cell = ws.cell(row=r_idx, column=c_idx, value=v)
-            if c_idx in (4, 8, 9):
+            if c_idx in (4, 9, 10):
                 cell.number_format = '£#,##0.00'
             if status_fills.get(b["status"]):
                 cell.fill = status_fills[b["status"]]
-
-    # column widths
-    widths = [12, 28, 24, 14, 12, 12, 28, 14, 14]
-    for i, w in enumerate(widths, start=1):
+        r_idx += 1
+    for i, w in enumerate([12, 28, 24, 14, 12, 12, 36, 28, 14, 14], start=1):
         ws.column_dimensions[chr(64 + i)].width = w
 
-    # Invoice sheet
     ws2 = wb.create_sheet("Invoices")
     inv_headers = ["Invoice #", "Debtor", "Date", "Amount", "Outstanding", "Status"]
     for col, h in enumerate(inv_headers, start=1):
         c = ws2.cell(row=1, column=col, value=h)
         c.font = hdr_font
         c.fill = hdr_fill
-    for r_idx, inv in enumerate(run["invoice_rows"], start=2):
+    r_idx = 2
+    async for inv in db.allocation_invoice_rows.find({"run_id": run_id, "user_id": current["id"]}, {"_id": 0}).sort("idx", 1):
         vals = [inv["number"], inv.get("debtor") or "", inv.get("date") or "",
                 inv["amount"], inv["remaining"], inv["status"]]
         for c_idx, v in enumerate(vals, start=1):
@@ -904,6 +1046,7 @@ async def export_allocation_xlsx(run_id: str, current=Depends(get_current_user))
                 cell.number_format = '£#,##0.00'
             if status_fills.get(inv["status"]):
                 cell.fill = status_fills[inv["status"]]
+        r_idx += 1
     for i, w in enumerate([14, 28, 12, 14, 14, 12], start=1):
         ws2.column_dimensions[chr(64 + i)].width = w
 
@@ -923,8 +1066,12 @@ async def manual_link(run_id: str, payload: ManualLinkIn, current=Depends(get_cu
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
 
-    bank = next((b for b in run["bank_rows"] if b["id"] == payload.bank_row_id), None)
-    inv = next((i for i in run["invoice_rows"] if i["id"] == payload.invoice_row_id), None)
+    bank = await db.allocation_bank_rows.find_one(
+        {"run_id": run_id, "user_id": current["id"], "id": payload.bank_row_id}, {"_id": 0, "run_id": 0, "user_id": 0}
+    )
+    inv = await db.allocation_invoice_rows.find_one(
+        {"run_id": run_id, "user_id": current["id"], "id": payload.invoice_row_id}, {"_id": 0, "run_id": 0, "user_id": 0}
+    )
     if not bank or not inv:
         raise HTTPException(status_code=404, detail="Bank or invoice row not found")
     amt = round(min(payload.amount, bank["remaining"], inv["remaining"]), 2)
@@ -934,30 +1081,32 @@ async def manual_link(run_id: str, payload: ManualLinkIn, current=Depends(get_cu
     link = {
         "bank_id": bank["id"], "invoice_id": inv["id"], "amount": amt,
         "method": "manual", "confidence": "manual",
+        "reason": "Manually linked by user",
+        "invoice_number": inv.get("number"),
+        "invoice_debtor": inv.get("debtor"),
     }
-    bank["matches"].append(link)
-    inv["matches"].append(link)
+    bank.setdefault("matches", []).append(link)
+    inv.setdefault("matches", []).append(link)
     bank["remaining"] = round(bank["remaining"] - amt, 2)
     inv["remaining"] = round(inv["remaining"] - amt, 2)
-
-    # recompute statuses
     bank["status"] = "full" if bank["remaining"] <= 0.005 else "partial"
     inv["status"] = "full" if inv["remaining"] <= 0.005 else "partial"
 
-    # recompute stats
-    bank_rows = run["bank_rows"]
-    invoice_rows = run["invoice_rows"]
-    stats = run["stats"]
-    stats["fully_matched"] = sum(1 for b in bank_rows if b["status"] == "full")
-    stats["partially_matched"] = sum(1 for b in bank_rows if b["status"] == "partial")
-    stats["unmatched_bank"] = sum(1 for b in bank_rows if b["status"] == "unmatched")
-    stats["unmatched_invoices"] = sum(1 for i in invoice_rows if i["status"] == "unmatched")
-    stats["total_allocated"] = round(sum(m["amount"] for b in bank_rows for m in b["matches"]), 2)
-    stats["total_outstanding"] = round(sum(i["remaining"] for i in invoice_rows), 2)
+    await db.allocation_bank_rows.update_one(
+        {"run_id": run_id, "user_id": current["id"], "id": bank["id"]},
+        {"$set": {"matches": bank["matches"], "remaining": bank["remaining"],
+                  "status": bank["status"], "reason": "Includes manual override"}},
+    )
+    await db.allocation_invoice_rows.update_one(
+        {"run_id": run_id, "user_id": current["id"], "id": inv["id"]},
+        {"$set": {"matches": inv["matches"], "remaining": inv["remaining"], "status": inv["status"]}},
+    )
 
+    # Recompute stats from the source of truth (the split collections)
+    stats = await _recompute_stats(run_id, current["id"])
     await db.allocation_runs.update_one(
         {"id": run_id, "user_id": current["id"]},
-        {"$set": {"bank_rows": bank_rows, "invoice_rows": invoice_rows, "stats": stats}},
+        {"$set": {"stats": stats}},
     )
     await write_audit(current["id"], run_id, "manual_link", {
         "bank_reference": bank.get("reference"),
@@ -965,6 +1114,33 @@ async def manual_link(run_id: str, payload: ManualLinkIn, current=Depends(get_cu
         "amount": amt,
     })
     return {"ok": True, "stats": stats, "bank": bank, "invoice": inv}
+
+
+async def _recompute_stats(run_id: str, user_id: str) -> Dict[str, Any]:
+    q = {"run_id": run_id, "user_id": user_id}
+    total_bank = await db.allocation_bank_rows.count_documents(q)
+    total_invoices = await db.allocation_invoice_rows.count_documents(q)
+    full = await db.allocation_bank_rows.count_documents({**q, "status": "full"})
+    partial = await db.allocation_bank_rows.count_documents({**q, "status": "partial"})
+    unmatched_bank = await db.allocation_bank_rows.count_documents({**q, "status": "unmatched"})
+    unmatched_inv = await db.allocation_invoice_rows.count_documents({**q, "status": "unmatched"})
+    agg_alloc = await db.allocation_bank_rows.aggregate([
+        {"$match": q},
+        {"$unwind": {"path": "$matches", "preserveNullAndEmptyArrays": False}},
+        {"$group": {"_id": None, "total": {"$sum": "$matches.amount"}}},
+    ]).to_list(1)
+    total_allocated = round(agg_alloc[0]["total"], 2) if agg_alloc else 0.0
+    agg_out = await db.allocation_invoice_rows.aggregate([
+        {"$match": q},
+        {"$group": {"_id": None, "total": {"$sum": "$remaining"}}},
+    ]).to_list(1)
+    total_outstanding = round(agg_out[0]["total"], 2) if agg_out else 0.0
+    return {
+        "total_bank": total_bank, "total_invoices": total_invoices,
+        "fully_matched": full, "partially_matched": partial,
+        "unmatched_bank": unmatched_bank, "unmatched_invoices": unmatched_inv,
+        "total_allocated": total_allocated, "total_outstanding": total_outstanding,
+    }
 
 
 # ----- Compare -----
@@ -975,15 +1151,17 @@ async def compare(run_ids: str, current=Depends(get_current_user)):
         raise HTTPException(status_code=400, detail="No run_ids provided")
     runs = await db.allocation_runs.find(
         {"id": {"$in": ids}, "user_id": current["id"]},
-        {"_id": 0},
+        {"_id": 0, "id": 1, "name": 1, "period": 1, "created_at": 1},
     ).to_list(50)
     runs_by_id = {r["id"]: r for r in runs}
     ordered = [runs_by_id[i] for i in ids if i in runs_by_id]
 
-    # Build debtor -> {run_id: status}
     matrix: Dict[str, Dict[str, Any]] = {}
     for r in ordered:
-        for inv in r["invoice_rows"]:
+        async for inv in db.allocation_invoice_rows.find(
+            {"run_id": r["id"], "user_id": current["id"]},
+            {"_id": 0, "debtor": 1, "remaining": 1, "status": 1, "number": 1},
+        ):
             debtor = (inv.get("debtor") or "Unknown").strip() or "Unknown"
             row = matrix.setdefault(debtor, {"debtor": debtor, "runs": {}})
             entry = row["runs"].get(r["id"], {"status": "absent", "outstanding": 0, "invoices": []})
@@ -997,12 +1175,10 @@ async def compare(run_ids: str, current=Depends(get_current_user)):
 
     rows = list(matrix.values())
     rows.sort(key=lambda x: -unmatched_count(x))
-
     consistently_unmatched = [
         row["debtor"] for row in rows
         if all(row["runs"].get(r["id"], {}).get("status") == "unmatched" for r in ordered)
     ]
-
     return {
         "runs": [{"id": r["id"], "name": r["name"], "period": r["period"], "created_at": r["created_at"]} for r in ordered],
         "rows": rows,
@@ -1013,17 +1189,23 @@ async def compare(run_ids: str, current=Depends(get_current_user)):
 # ----- Debtor report -----
 @api.get("/debtors")
 async def debtors(threshold: float = 0.0, current=Depends(get_current_user)):
-    runs = await db.allocation_runs.find({"user_id": current["id"]}, {"_id": 0}).sort("created_at", -1).to_list(500)
+    runs = await db.allocation_runs.find(
+        {"user_id": current["id"]},
+        {"_id": 0, "id": 1, "name": 1, "period": 1},
+    ).sort("created_at", -1).to_list(500)
     agg: Dict[str, Dict[str, Any]] = {}
     for r in runs:
-        for inv in r["invoice_rows"]:
+        async for inv in db.allocation_invoice_rows.find(
+            {"run_id": r["id"], "user_id": current["id"]},
+            {"_id": 0, "debtor": 1, "remaining": 1, "matches": 1, "status": 1, "number": 1},
+        ):
             debtor = (inv.get("debtor") or "Unknown").strip() or "Unknown"
             d = agg.setdefault(debtor, {
                 "debtor": debtor, "total_outstanding": 0.0, "total_allocated": 0.0,
                 "invoice_count": 0, "runs": [],
             })
             d["total_outstanding"] = round(d["total_outstanding"] + inv["remaining"], 2)
-            allocated = round(sum(m["amount"] for m in inv["matches"]), 2)
+            allocated = round(sum(m["amount"] for m in inv.get("matches", [])), 2)
             d["total_allocated"] = round(d["total_allocated"] + allocated, 2)
             d["invoice_count"] += 1
             d["runs"].append({
@@ -1096,6 +1278,13 @@ app.add_middleware(
 async def startup():
     await db.users.create_index("email", unique=True)
     await db.allocation_runs.create_index([("user_id", 1), ("created_at", -1)])
+    await db.allocation_runs.create_index([("id", 1), ("user_id", 1)])
+    await db.allocation_bank_rows.create_index([("run_id", 1), ("user_id", 1), ("idx", 1)])
+    await db.allocation_bank_rows.create_index([("run_id", 1), ("user_id", 1), ("status", 1)])
+    await db.allocation_bank_rows.create_index([("run_id", 1), ("user_id", 1), ("id", 1)])
+    await db.allocation_invoice_rows.create_index([("run_id", 1), ("user_id", 1), ("idx", 1)])
+    await db.allocation_invoice_rows.create_index([("run_id", 1), ("user_id", 1), ("status", 1)])
+    await db.allocation_invoice_rows.create_index([("run_id", 1), ("user_id", 1), ("id", 1)])
     await db.audit_logs.create_index([("user_id", 1), ("created_at", -1)])
     # Seed admin
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@ebbusiness.com").lower()

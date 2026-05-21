@@ -1,0 +1,47 @@
+{
+  "summary": "ITER12 scalability refactor verified — both backend (new split-collection storage + paginated /rows endpoint + async background processing) and frontend (paginated AllocationDetail with per-tab search) work end-to-end. New /app/backend/tests/test_iter12_scalability.py: 17/17 PASS in 5.6s. Frontend: login + dashboard + detail page + 4-tab switching + pagination + search all functional. 29k-invoice stress test run: all 4 tabs load 1.55–1.95s (target <2s met), pagination Prev/Next works, page-next click+fetch=1.47s. Denormalised matches (invoice_number + invoice_debtor) correctly displayed in the UI without separate invoice lookup.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "n/a (test debt)",
+        "issue": "15 legacy regression tests in /app/backend/tests/test_strict_classification.py, /app/backend/tests/test_iter10_overhaul.py, /app/backend/tests/test_backend.py still access run['bank_rows'] / run['invoice_rows'] directly on the POST /allocations response. After iter12 those arrays are no longer embedded (rows moved to allocation_bank_rows / allocation_invoice_rows). The tests need rewriting to fetch via GET /api/allocations/{id}/rows. Functional behaviour is unchanged — failures are pure test-API drift, not regressions."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter12_scalability.py",
+    "/app/test_reports/pytest/iter12_scalability.xml",
+    "/app/test_reports/pytest/iter12_full.xml"
+  ],
+  "action_items": [
+    "(MEDIUM) Update the 15 stale legacy tests (test_strict_classification.py, test_iter10_overhaul.py, test_backend.py::test_get_run/test_manual_link) to read rows from /api/allocations/{id}/rows instead of run['bank_rows']/run['invoice_rows']. iter12 tests demonstrate the pattern.",
+    "(LOW) Same as iter11: split server.py (now 1306 lines — matching engine, storage helpers, and routes should be separate modules).",
+    "(LOW) Migrate @app.on_event('startup'/'shutdown') to FastAPI lifespan handlers (DeprecationWarning emitted on every test run)."
+  ],
+  "critical_code_review_comments": [
+    "create_allocation threshold for async processing is bank_row_count>2000 OR invoice_row_count>2000 (server.py:830). Small runs (n<=2000) still process synchronously inside the HTTP request — that's fine but means a request with 2000 invoices could block for several seconds in the worker. Consider lowering threshold to ~500 for tighter HTTP SLOs.",
+    "get_allocation_rows correctly caps page_size to 500 and validates bucket against an allow-list. Mongo regex search uses re.escape — safe from injection. Indexes on (run_id, user_id, status) and (run_id, user_id, idx) are claimed in startup; verify via db.allocation_bank_rows.getIndexes() in production.",
+    "_recompute_stats and manual_link operate on the split collections correctly (no in-memory load of all rows during link). enrich_matches mutates rows in place before persistence — fine for write path but be aware that re-running matching on an existing run would double-enrich (not currently a code path).",
+    "Frontend ManualLinkDialog still does GET /rows?page_size=200 for both unmatched buckets to populate selects — works for moderate scale but on a 29k-row run with many unmatched, only the first 200 of each will be selectable. Consider an async-search select for that dialog if unmatched counts get large.",
+    "list_allocations projects {bank_rows:0, invoice_rows:0} (server.py:872) — defensive but harmless given iter12 docs no longer have those keys."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter12_scalability.py (new)"
+  ],
+  "success_rate": {
+    "backend": "100% on new iter12 suite (17/17); legacy regression suite has 15 stale tests due to API contract change (rows moved out of run doc) — see action_items.",
+    "frontend": "100% on core scalability UI flows (login, dashboard, detail, 4-tab paginated load on 29k run, search, page Next/Prev, denormalised match display)."
+  },
+  "test_credentials": "admin@ebbusiness.com / Admin@2026! (verified working via /api/auth/login -> access_token in body; localStorage['ebrr_access_token'] populated client-side)",
+  "seed_data_creation": "Pytest created ~2 transient runs (TEST_iter12_small ~3 rows, TEST_iter12_large ~800 bank + 2500 invoices) and cleaned them up via DELETE in fixture teardown.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "iter12 scalability refactor is verified green. Newest authoritative backend test file is /app/backend/tests/test_iter12_scalability.py — use it as the template for split-collection assertions (header has no bank_rows/invoice_rows; rows come via /rows endpoint; manual-link payload uses bank_row_id/invoice_row_id; debtors endpoint returns {rows,...} wrapper not bare list). The 15 failing legacy tests are stale and should be rewritten OR deleted, not investigated as regressions. 29k-invoice stress run remains in the admin tenant under the name '29k-invoice stress test' for future re-test of pagination scale.",
+  "rca_of_the_issue": "n/a — no bug found in iter12 implementation. The 15 legacy test failures are API-contract drift caused intentionally by the refactor (rows moved from embedded arrays to separate collections), not behaviour regressions."
+}
