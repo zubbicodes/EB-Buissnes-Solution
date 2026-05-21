@@ -200,6 +200,9 @@ export default function NewAllocation() {
                 <MappingGroup title="Bank columns" fields={BANK_FIELDS} headers={bankHeaders} mapping={mapping} setMapping={setMapping} />
                 <MappingGroup title="Invoice columns" fields={INV_FIELDS} headers={invHeaders} mapping={mapping} setMapping={setMapping} />
               </div>
+              <div className="mt-8 border-t border-slate-200 pt-6">
+                <PresetPicker mapping={mapping} setMapping={setMapping} bankHeaders={bankHeaders} invHeaders={invHeaders} />
+              </div>
             </div>
           </div>
         )}
@@ -465,5 +468,144 @@ function Field({ label, children }) {
       <span className="text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">{label}</span>
       <div className="mt-1.5">{children}</div>
     </label>
+  );
+}
+
+function PresetPicker({ mapping, setMapping, bankHeaders, invHeaders }) {
+  const [presets, setPresets] = useState({ built_in: [], saved: [] });
+  const [saving, setSaving] = useState(false);
+  const [showSave, setShowSave] = useState(false);
+  const [profileLabel, setProfileLabel] = useState("");
+  const [profileScope, setProfileScope] = useState("both");
+
+  const load = async () => {
+    try {
+      const { data } = await api.get("/mapping/presets");
+      setPresets(data);
+    } catch (e) { toast.error(formatError(e)); }
+  };
+  useEffect(() => { load(); }, []);
+
+  const apply = (preset) => {
+    // Only fill keys whose value matches an existing header in the relevant CSV; warn otherwise
+    const headers = preset.scope === "bank" ? bankHeaders : preset.scope === "invoice" ? invHeaders : [...bankHeaders, ...invHeaders];
+    const next = { ...mapping };
+    let applied = 0, missed = [];
+    for (const [k, v] of Object.entries(preset.mapping || {})) {
+      if (headers.includes(v)) {
+        next[k] = v;
+        applied++;
+      } else {
+        missed.push(`${k}: '${v}'`);
+      }
+    }
+    setMapping(next);
+    if (applied) toast.success(`Applied preset "${preset.label}" — ${applied} field${applied > 1 ? "s" : ""} mapped`);
+    if (missed.length) toast.warning(`${missed.length} field${missed.length > 1 ? "s" : ""} not found in your CSV headers; mapped manually if needed.`);
+  };
+
+  const submitSave = async () => {
+    if (!profileLabel.trim()) return;
+    setSaving(true);
+    try {
+      await api.post("/mapping/presets", {
+        label: profileLabel.trim(),
+        scope: profileScope,
+        mapping,
+      });
+      toast.success("Mapping profile saved");
+      setShowSave(false);
+      setProfileLabel("");
+      await load();
+    } catch (e) {
+      const msg = formatError(e);
+      if (msg.toLowerCase().includes("pro feature")) {
+        toast.error("Saving mapping profiles is a Pro feature.", {
+          action: { label: "Upgrade", onClick: () => { window.location.href = "/pricing"; } },
+        });
+      } else {
+        toast.error(msg);
+      }
+    }
+    setSaving(false);
+  };
+
+  const remove = async (id) => {
+    try {
+      await api.delete(`/mapping/presets/${id}`);
+      toast.success("Profile deleted");
+      await load();
+    } catch (e) { toast.error(formatError(e)); }
+  };
+
+  return (
+    <div data-testid="preset-picker">
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Column-mapping presets</div>
+        <button onClick={() => setShowSave((s) => !s)} className="text-xs font-semibold text-emerald-700 hover:text-emerald-900" data-testid="save-profile-btn">
+          {showSave ? "Cancel" : "+ Save as profile"}
+        </button>
+      </div>
+
+      {showSave && (
+        <div className="bg-slate-50 border border-slate-200 rounded-md p-4 mb-4" data-testid="save-profile-panel">
+          <div className="text-xs text-slate-500 mb-2">Saved profiles are Pro-only. Free preview is available below.</div>
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="flex-1 min-w-[200px]">
+              <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Profile name</div>
+              <input value={profileLabel} onChange={(e) => setProfileLabel(e.target.value)} placeholder="e.g. My Sage debtor export"
+                className="w-full border border-slate-200 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
+                data-testid="save-profile-label" />
+            </div>
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Scope</div>
+              <select value={profileScope} onChange={(e) => setProfileScope(e.target.value)}
+                className="border border-slate-200 rounded-md px-2 py-1.5 text-sm"
+                data-testid="save-profile-scope">
+                <option value="both">Both</option>
+                <option value="bank">Bank only</option>
+                <option value="invoice">Invoice only</option>
+              </select>
+            </div>
+            <button onClick={submitSave} disabled={!profileLabel.trim() || saving}
+              className="bg-[#0F172A] text-white text-sm font-semibold px-4 py-1.5 rounded-md hover:bg-slate-800 disabled:opacity-50"
+              data-testid="save-profile-submit">
+              {saving ? "Saving…" : "Save profile"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {presets.saved.length > 0 && (
+        <div className="mb-4">
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-2">Your saved profiles</div>
+          <div className="flex flex-wrap gap-2">
+            {presets.saved.map((p) => (
+              <div key={p.id} className="inline-flex items-center gap-2 bg-emerald-50 border border-emerald-200 rounded-full pl-3 pr-1 py-1">
+                <button onClick={() => apply(p)} className="text-xs font-semibold text-emerald-800 hover:text-emerald-900" data-testid={`apply-saved-${p.id}`}>
+                  {p.label}
+                </button>
+                <button onClick={() => remove(p.id)} className="text-xs text-emerald-700 hover:text-rose-700 rounded-full w-5 h-5 flex items-center justify-center" data-testid={`delete-saved-${p.id}`}>
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-2">Built-in presets</div>
+      <div className="flex flex-wrap gap-2">
+        {presets.built_in.map((p) => (
+          <button key={p.id} onClick={() => apply(p)}
+            data-testid={`apply-preset-${p.id}`}
+            className="inline-flex items-center gap-2 bg-white border border-slate-200 hover:border-emerald-400 hover:bg-emerald-50 text-slate-700 hover:text-emerald-800 rounded-full px-3 py-1 text-xs font-semibold transition-colors">
+            <span className="inline-block w-1.5 h-1.5 rounded-full bg-slate-300" />
+            {p.label}
+            <span className="text-[10px] uppercase tracking-wider text-slate-400">{p.scope}</span>
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }

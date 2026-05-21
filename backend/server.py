@@ -13,7 +13,7 @@ import logging
 import bcrypt
 import jwt
 from datetime import datetime, timezone, timedelta
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, status, BackgroundTasks
 from fastapi.responses import StreamingResponse
@@ -22,6 +22,9 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr
 from rapidfuzz import fuzz, process as rf_process, utils as rf_utils
 from collections import defaultdict
+from emergentintegrations.payments.stripe.checkout import (
+    StripeCheckout, CheckoutSessionRequest,
+)
 
 
 # ----- DB / Config -----
@@ -34,6 +37,50 @@ JWT_SECRET = os.environ['JWT_SECRET']
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+STRIPE_API_KEY = os.environ.get("STRIPE_API_KEY", "sk_test_emergent")
+
+# Pricing — keep amounts on the BACKEND only, never trust the frontend
+PRICING = {
+    "pro_monthly": {"label": "Pro (monthly)", "amount": 49.00, "currency": "gbp", "grant_days": 30},
+}
+
+STARTER_MONTHLY_ROW_LIMIT = 5000
+
+
+def effective_tier(user: Dict[str, Any]) -> str:
+    until = user.get("pro_until")
+    if not until:
+        return "starter"
+    try:
+        return "pro" if datetime.fromisoformat(until.replace("Z", "+00:00")) > datetime.now(timezone.utc) else "starter"
+    except (ValueError, AttributeError):
+        return "starter"
+
+
+def usage_month_key() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m")
+
+
+async def check_row_quota(user_id: str, new_rows: int) -> Tuple[bool, int]:
+    """Return (allowed, current_usage_this_month)."""
+    user = await db.users.find_one({"id": user_id})
+    tier = effective_tier(user) if user else "starter"
+    month = usage_month_key()
+    counter_doc = await db.row_usage.find_one({"user_id": user_id, "month": month})
+    current = counter_doc["count"] if counter_doc else 0
+    if tier == "pro":
+        return True, current
+    return (current + new_rows) <= STARTER_MONTHLY_ROW_LIMIT, current
+
+
+async def record_row_usage(user_id: str, rows: int):
+    month = usage_month_key()
+    await db.row_usage.update_one(
+        {"user_id": user_id, "month": month},
+        {"$inc": {"count": rows}, "$setOnInsert": {"user_id": user_id, "month": month}},
+        upsert=True,
+    )
 
 
 # ----- Auth utils -----
@@ -705,7 +752,245 @@ async def refresh_session(request: Request, response: Response):
 
 @api.get("/auth/me")
 async def me(current=Depends(get_current_user)):
-    return current
+    # Decorate the user object with current tier + usage so the UI can show the plan badge
+    tier = effective_tier(current)
+    counter = await db.row_usage.find_one({"user_id": current["id"], "month": usage_month_key()})
+    return {
+        **current,
+        "tier": tier,
+        "pro_until": current.get("pro_until"),
+        "row_usage_this_month": counter["count"] if counter else 0,
+        "row_limit_starter": STARTER_MONTHLY_ROW_LIMIT,
+    }
+
+
+# ----- Plan / Billing -----
+@api.get("/billing/plan")
+async def get_plan(current=Depends(get_current_user)):
+    tier = effective_tier(current)
+    counter = await db.row_usage.find_one({"user_id": current["id"], "month": usage_month_key()})
+    return {
+        "tier": tier,
+        "pro_until": current.get("pro_until"),
+        "row_usage_this_month": counter["count"] if counter else 0,
+        "row_limit_starter": STARTER_MONTHLY_ROW_LIMIT,
+        "pricing": PRICING,
+    }
+
+
+class CheckoutInit(BaseModel):
+    package_id: str
+    origin_url: str
+
+
+@api.post("/billing/checkout")
+async def billing_checkout(payload: CheckoutInit, request: Request, current=Depends(get_current_user)):
+    if payload.package_id not in PRICING:
+        raise HTTPException(status_code=400, detail="Unknown package")
+    pkg = PRICING[payload.package_id]
+    host = str(request.base_url).rstrip("/")
+    webhook_url = f"{host}/api/webhook/stripe"
+    stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
+    origin = payload.origin_url.rstrip("/")
+    success_url = f"{origin}/billing/success?session_id={{CHECKOUT_SESSION_ID}}"
+    cancel_url = f"{origin}/billing/cancel"
+    metadata = {
+        "user_id": current["id"],
+        "email": current["email"],
+        "package_id": payload.package_id,
+        "grant_days": str(pkg["grant_days"]),
+    }
+    req = CheckoutSessionRequest(
+        amount=float(pkg["amount"]),
+        currency=pkg["currency"],
+        success_url=success_url,
+        cancel_url=cancel_url,
+        metadata=metadata,
+    )
+    session = await stripe.create_checkout_session(req)
+
+    await db.payment_transactions.insert_one({
+        "id": str(uuid.uuid4()),
+        "session_id": session.session_id,
+        "user_id": current["id"],
+        "email": current["email"],
+        "amount": pkg["amount"],
+        "currency": pkg["currency"],
+        "package_id": payload.package_id,
+        "payment_status": "initiated",
+        "status": "pending",
+        "metadata": metadata,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    return {"url": session.url, "session_id": session.session_id}
+
+
+async def _apply_paid_subscription(user_id: str, package_id: str):
+    """Grant Pro by extending pro_until. Idempotent — only extends if there's no current Pro period yet."""
+    pkg = PRICING.get(package_id)
+    if not pkg:
+        return
+    user = await db.users.find_one({"id": user_id})
+    if not user:
+        return
+    now = datetime.now(timezone.utc)
+    base = now
+    cur = user.get("pro_until")
+    if cur:
+        try:
+            cur_dt = datetime.fromisoformat(cur.replace("Z", "+00:00"))
+            if cur_dt > now:
+                base = cur_dt  # stack the period
+        except (ValueError, AttributeError):
+            pass
+    new_until = base + timedelta(days=int(pkg["grant_days"]))
+    await db.users.update_one(
+        {"id": user_id},
+        {"$set": {"pro_until": new_until.isoformat(), "tier": "pro"}},
+    )
+
+
+@api.get("/billing/status/{session_id}")
+async def billing_status(session_id: str, request: Request, current=Depends(get_current_user)):
+    tx = await db.payment_transactions.find_one({"session_id": session_id, "user_id": current["id"]}, {"_id": 0})
+    if not tx:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # If we've already processed it, return the cached status
+    if tx["payment_status"] == "paid":
+        return tx
+
+    host = str(request.base_url).rstrip("/")
+    webhook_url = f"{host}/api/webhook/stripe"
+    stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
+    cs = await stripe.get_checkout_status(session_id)
+
+    new_status = "complete" if cs.status == "complete" else cs.status
+    new_payment_status = cs.payment_status
+    update = {"status": new_status, "payment_status": new_payment_status,
+              "updated_at": datetime.now(timezone.utc).isoformat()}
+    await db.payment_transactions.update_one(
+        {"session_id": session_id, "user_id": current["id"]},
+        {"$set": update},
+    )
+    # Grant Pro ONLY on first paid transition
+    if new_payment_status == "paid" and tx["payment_status"] != "paid":
+        await _apply_paid_subscription(current["id"], tx.get("package_id"))
+        await write_audit(current["id"], None, "subscription_paid", {
+            "session_id": session_id, "amount": tx.get("amount"), "currency": tx.get("currency"),
+        })
+    out = await db.payment_transactions.find_one({"session_id": session_id, "user_id": current["id"]}, {"_id": 0})
+    return out
+
+
+@api.post("/webhook/stripe")
+async def stripe_webhook(request: Request):
+    """Stripe → us. We verify and update the transaction + grant Pro if paid."""
+    body = await request.body()
+    signature = request.headers.get("Stripe-Signature", "")
+    host = str(request.base_url).rstrip("/")
+    webhook_url = f"{host}/api/webhook/stripe"
+    stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
+    try:
+        event = await stripe.handle_webhook(body, signature)
+    except Exception as e:
+        logger.warning("Stripe webhook verify failed: %s", e)
+        raise HTTPException(status_code=400, detail="Invalid signature")
+    if not event:
+        return {"ok": True}
+    tx = await db.payment_transactions.find_one({"session_id": event.session_id})
+    if tx and event.payment_status == "paid" and tx.get("payment_status") != "paid":
+        await db.payment_transactions.update_one(
+            {"session_id": event.session_id},
+            {"$set": {"payment_status": "paid", "status": "complete",
+                      "updated_at": datetime.now(timezone.utc).isoformat()}},
+        )
+        await _apply_paid_subscription(tx["user_id"], tx.get("package_id"))
+        await write_audit(tx["user_id"], None, "subscription_paid_webhook", {
+            "session_id": event.session_id,
+        })
+    return {"ok": True}
+
+
+# ----- CSV column-mapping presets (built-in) and saved profiles (per-user) -----
+BUILT_IN_PRESETS = [
+    {
+        "id": "barclays_business",
+        "label": "Barclays Business (UK)",
+        "scope": "bank",
+        "mapping": {"bank_date": "Date", "bank_reference": "Memo", "bank_payer": "Subcategory", "bank_amount": "Amount", "bank_account": "Account Number"},
+    },
+    {
+        "id": "hsbc_uk",
+        "label": "HSBC UK",
+        "scope": "bank",
+        "mapping": {"bank_date": "Date", "bank_reference": "Reference", "bank_payer": "Payee", "bank_amount": "Paid In", "bank_transaction_type": "Type"},
+    },
+    {
+        "id": "lloyds_uk",
+        "label": "Lloyds UK",
+        "scope": "bank",
+        "mapping": {"bank_date": "Transaction Date", "bank_reference": "Transaction Description", "bank_amount": "Credit Amount", "bank_transaction_type": "Transaction Type"},
+    },
+    {
+        "id": "xero_aged_debtors",
+        "label": "Xero Aged Receivables",
+        "scope": "invoice",
+        "mapping": {"invoice_number": "Invoice Number", "invoice_debtor": "Customer", "invoice_amount": "Invoice Amount", "invoice_outstanding": "Outstanding", "invoice_date": "Invoice Date", "invoice_due_date": "Due Date"},
+    },
+    {
+        "id": "sage_aged_debtors",
+        "label": "Sage Aged Debtors",
+        "scope": "invoice",
+        "mapping": {"invoice_number": "Reference", "invoice_debtor": "Account Name", "invoice_amount": "Net", "invoice_outstanding": "Balance", "invoice_date": "Date"},
+    },
+    {
+        "id": "quickbooks_aged",
+        "label": "QuickBooks A/R Aging",
+        "scope": "invoice",
+        "mapping": {"invoice_number": "Num", "invoice_debtor": "Customer", "invoice_amount": "Amount", "invoice_outstanding": "Open Balance", "invoice_date": "Date", "invoice_due_date": "Due Date"},
+    },
+]
+
+
+@api.get("/mapping/presets")
+async def list_presets(current=Depends(get_current_user)):
+    user_profiles = await db.user_mapping_profiles.find(
+        {"user_id": current["id"]}, {"_id": 0, "user_id": 0}
+    ).sort("created_at", -1).to_list(100)
+    return {"built_in": BUILT_IN_PRESETS, "saved": user_profiles}
+
+
+class SaveMappingIn(BaseModel):
+    label: str = Field(min_length=1, max_length=80)
+    scope: str = Field(pattern=r"^(bank|invoice|both)$")
+    mapping: Dict[str, Any]
+
+
+@api.post("/mapping/presets")
+async def save_preset(payload: SaveMappingIn, current=Depends(get_current_user)):
+    # Pro-only feature gate
+    if effective_tier(current) != "pro":
+        raise HTTPException(status_code=402, detail="Saving mapping profiles is a Pro feature. Upgrade at /pricing.")
+    doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": current["id"],
+        "label": payload.label,
+        "scope": payload.scope,
+        "mapping": payload.mapping,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.user_mapping_profiles.insert_one(doc)
+    doc.pop("user_id", None)
+    return doc
+
+
+@api.delete("/mapping/presets/{preset_id}")
+async def delete_preset(preset_id: str, current=Depends(get_current_user)):
+    res = await db.user_mapping_profiles.delete_one({"id": preset_id, "user_id": current["id"]})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return {"ok": True}
 
 
 # ----- Allocation routes -----
@@ -826,6 +1111,23 @@ async def create_allocation(payload: AllocationCreate, background: BackgroundTas
 
     bank_row_count = validation.get("bank_row_count", 0)
     invoice_row_count = validation.get("invoice_row_count", 0)
+    total_rows = bank_row_count + invoice_row_count
+
+    # Tier-based quota: Starter is capped at 5,000 rows per calendar month.
+    allowed, current_usage = await check_row_quota(current["id"], total_rows)
+    if not allowed:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "code": "QUOTA_EXCEEDED",
+                "message": f"Starter plan limit reached: {current_usage}/{STARTER_MONTHLY_ROW_LIMIT} rows used this month. This run would add {total_rows} more rows. Upgrade to Pro for unlimited rows.",
+                "tier": "starter",
+                "used": current_usage,
+                "limit": STARTER_MONTHLY_ROW_LIMIT,
+                "would_add": total_rows,
+            },
+        )
+
     # Anything > 2000 on either side runs in the background to keep HTTP fast
     is_large = bank_row_count > 2000 or invoice_row_count > 2000
 
@@ -846,6 +1148,7 @@ async def create_allocation(payload: AllocationCreate, background: BackgroundTas
             "fully_matched": 0, "partially_matched": 0, "unmatched_bank": 0,
             "unmatched_invoices": 0, "total_allocated": 0.0, "total_outstanding": 0.0,
         }})
+        await record_row_usage(current["id"], total_rows)
         background.add_task(_process_run_async, run_id, current["id"], payload.bank_csv, payload.invoice_csv, payload.mapping.model_dump())
         doc = await db.allocation_runs.find_one({"id": run_id, "user_id": current["id"]}, {"_id": 0})
         return doc
@@ -858,6 +1161,7 @@ async def create_allocation(payload: AllocationCreate, background: BackgroundTas
     doc = {**base_doc, "stats": stats}
     await db.allocation_runs.insert_one(doc)
     await save_run_rows(run_id, current["id"], bank_rows, invoice_rows)
+    await record_row_usage(current["id"], total_rows)
     await write_audit(current["id"], run_id, "create_run", {
         "name": payload.name, "period": payload.period, "stats": stats,
     })

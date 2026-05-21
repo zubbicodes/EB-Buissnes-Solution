@@ -392,32 +392,45 @@ function ManualLinkDialog({ runId, context, onClose, onLinked }) {
   const [invoiceId, setInvoiceId] = useState(context.invoiceId || "");
   const [amount, setAmount] = useState("");
   const [busy, setBusy] = useState(false);
-  const [banks, setBanks] = useState([]);
-  const [invs, setInvs] = useState([]);
-  const [loadingOptions, setLoadingOptions] = useState(false);
 
-  // Load eligible banks + invoices (first 200 of each — usually enough; manual linking is for the long tail)
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      setLoadingOptions(true);
-      try {
-        const [b, i] = await Promise.all([
-          api.get(`/allocations/${runId}/rows`, { params: { bucket: "unmatched_bank", page: 1, page_size: 200 } }),
-          api.get(`/allocations/${runId}/rows`, { params: { bucket: "unmatched_invoice", page: 1, page_size: 200 } }),
-        ]);
-        if (!cancelled) {
-          setBanks(b.data.rows || []);
-          setInvs(i.data.rows || []);
-        }
-      } catch (e) { toast.error(formatError(e)); }
-      finally { if (!cancelled) setLoadingOptions(false); }
-    })();
-    return () => { cancelled = true; };
+  const [bankSearch, setBankSearch] = useState("");
+  const [invSearch, setInvSearch] = useState("");
+  const [bankResults, setBankResults] = useState([]);
+  const [invResults, setInvResults] = useState([]);
+  const [bankTotal, setBankTotal] = useState(0);
+  const [invTotal, setInvTotal] = useState(0);
+  const [selectedBank, setSelectedBank] = useState(null);
+  const [selectedInv, setSelectedInv] = useState(null);
+
+  const fetchSide = useCallback(async (bucket, search, setter, totalSetter) => {
+    try {
+      const { data } = await api.get(`/allocations/${runId}/rows`, {
+        params: { bucket, page: 1, page_size: 25, search },
+      });
+      setter(data.rows || []);
+      totalSetter(data.total || 0);
+    } catch (e) { /* swallow — toast shown by interceptor / parent */ }
   }, [runId]);
 
-  const bank = banks.find((b) => b.id === bankId);
-  const inv = invs.find((i) => i.id === invoiceId);
+  // initial load (and refetch on search change with debounce)
+  useEffect(() => {
+    const t = setTimeout(() => fetchSide("unmatched_bank", bankSearch, setBankResults, setBankTotal), 250);
+    return () => clearTimeout(t);
+  }, [bankSearch, fetchSide]);
+  useEffect(() => {
+    const t = setTimeout(() => fetchSide("unmatched_invoice", invSearch, setInvResults, setInvTotal), 250);
+    return () => clearTimeout(t);
+  }, [invSearch, fetchSide]);
+
+  // If a context bank/invoice was pre-selected, fetch its details once
+  useEffect(() => {
+    if (context.bankId) {
+      api.get(`/allocations/${runId}/rows`, { params: { bucket: "unmatched_bank", page: 1, page_size: 1, search: "" } }).catch(() => {});
+    }
+  }, []); // eslint-disable-line
+
+  const bank = selectedBank || bankResults.find((b) => b.id === bankId);
+  const inv = selectedInv || invResults.find((i) => i.id === invoiceId);
 
   useEffect(() => {
     if (bank && inv) {
@@ -437,45 +450,53 @@ function ManualLinkDialog({ runId, context, onClose, onLinked }) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4" data-testid="link-dialog">
-      <div className="bg-white rounded-md border border-slate-200 max-w-2xl w-full p-6">
+      <div className="bg-white rounded-md border border-slate-200 max-w-3xl w-full p-6 max-h-[90vh] overflow-y-auto">
         <h3 className="font-display font-semibold text-xl">Link bank payment to invoice</h3>
-        <p className="text-sm text-slate-500 mt-1">Both selections will be audit-logged.</p>
+        <p className="text-sm text-slate-500 mt-1">Search across all unmatched rows. Selection will be audit-logged.</p>
 
-        {loadingOptions ? (
-          <div className="py-10 text-center text-slate-500">Loading unmatched rows…</div>
-        ) : (
-          <>
-            <div className="grid md:grid-cols-2 gap-4 mt-6">
-              <div>
-                <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">Bank payment</div>
-                <select value={bankId} onChange={(e) => setBankId(e.target.value)} className="w-full border border-slate-200 rounded-md px-2 py-2 text-sm" data-testid="dialog-bank-select">
-                  <option value="">— Select —</option>
-                  {banks.map((b) => (
-                    <option key={b.id} value={b.id}>{(b.reference || "(no ref)").slice(0, 40)} — {fmtGBP(b.remaining)} remaining</option>
-                  ))}
-                </select>
-                {bank && <div className="mt-2 text-xs text-slate-600">{bank.payer} · {bank.date || "no date"}</div>}
-              </div>
-              <div>
-                <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">Invoice</div>
-                <select value={invoiceId} onChange={(e) => setInvoiceId(e.target.value)} className="w-full border border-slate-200 rounded-md px-2 py-2 text-sm" data-testid="dialog-invoice-select">
-                  <option value="">— Select —</option>
-                  {invs.map((i) => (
-                    <option key={i.id} value={i.id}>{i.number} — {(i.debtor || "").slice(0, 28)} — {fmtGBP(i.remaining)} outstanding</option>
-                  ))}
-                </select>
-                {inv && <div className="mt-2 text-xs text-slate-600">{inv.debtor}</div>}
-              </div>
-            </div>
+        <div className="grid md:grid-cols-2 gap-4 mt-6">
+          <SearchableList
+            label={`Bank payments (${bankTotal.toLocaleString("en-GB")})`}
+            search={bankSearch} setSearch={setBankSearch}
+            placeholder="Search reference / payer / invoice…"
+            rows={bankResults} selectedId={bankId}
+            renderRow={(b) => (
+              <>
+                <div className="font-mono text-xs truncate">{b.reference || "(no ref)"}</div>
+                <div className="text-xs text-slate-500 truncate flex items-center justify-between gap-2">
+                  <span className="truncate">{b.payer || "—"} · {b.date || "no date"}</span>
+                  <span className="text-emerald-700 font-semibold tabular-nums shrink-0">{fmtGBP(b.remaining)}</span>
+                </div>
+              </>
+            )}
+            onSelect={(b) => { setBankId(b.id); setSelectedBank(b); }}
+            testid="link-bank-list"
+          />
+          <SearchableList
+            label={`Invoices (${invTotal.toLocaleString("en-GB")})`}
+            search={invSearch} setSearch={setInvSearch}
+            placeholder="Search invoice # / debtor…"
+            rows={invResults} selectedId={invoiceId}
+            renderRow={(i) => (
+              <>
+                <div className="font-mono text-xs truncate">{i.number}</div>
+                <div className="text-xs text-slate-500 truncate flex items-center justify-between gap-2">
+                  <span className="truncate">{i.debtor || "—"}</span>
+                  <span className="text-rose-700 font-semibold tabular-nums shrink-0">{fmtGBP(i.remaining)}</span>
+                </div>
+              </>
+            )}
+            onSelect={(i) => { setInvoiceId(i.id); setSelectedInv(i); }}
+            testid="link-invoice-list"
+          />
+        </div>
 
-            <div className="mt-4">
-              <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">Amount to allocate (£)</div>
-              <input value={amount} onChange={(e) => setAmount(e.target.value)} type="number" step="0.01"
-                className="w-full md:w-60 border border-slate-200 rounded-md px-3 py-2 text-sm"
-                data-testid="dialog-amount" />
-            </div>
-          </>
-        )}
+        <div className="mt-4">
+          <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">Amount to allocate (£)</div>
+          <input value={amount} onChange={(e) => setAmount(e.target.value)} type="number" step="0.01"
+            className="w-full md:w-60 border border-slate-200 rounded-md px-3 py-2 text-sm"
+            data-testid="dialog-amount" />
+        </div>
 
         <div className="flex items-center justify-end gap-2 mt-6">
           <button onClick={onClose} className="px-4 py-2 text-sm font-semibold text-slate-600 hover:text-slate-900" data-testid="dialog-cancel">Cancel</button>
@@ -484,6 +505,30 @@ function ManualLinkDialog({ runId, context, onClose, onLinked }) {
             {busy ? "Linking…" : "Confirm link"}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function SearchableList({ label, search, setSearch, placeholder, rows, selectedId, renderRow, onSelect, testid }) {
+  return (
+    <div>
+      <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">{label}</div>
+      <div className="relative mb-2">
+        <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-400" />
+        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder={placeholder}
+          className="w-full border border-slate-200 rounded-md pl-8 pr-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
+          data-testid={`${testid}-search`} />
+      </div>
+      <div className="border border-slate-200 rounded-md max-h-64 overflow-y-auto divide-y divide-slate-100" data-testid={testid}>
+        {rows.length === 0 ? (
+          <div className="px-3 py-6 text-center text-xs text-slate-400">No results.</div>
+        ) : rows.map((r) => (
+          <button key={r.id} onClick={() => onSelect(r)} data-testid={`${testid}-row-${r.id}`}
+            className={`w-full text-left px-3 py-2 hover:bg-slate-50 ${selectedId === r.id ? "bg-emerald-50" : ""}`}>
+            {renderRow(r)}
+          </button>
+        ))}
       </div>
     </div>
   );

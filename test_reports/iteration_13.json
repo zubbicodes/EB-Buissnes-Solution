@@ -1,0 +1,48 @@
+{
+  "summary": "ITER13 — Pro tier billing, mapping presets, monthly row quota and async-search on /rows verified end-to-end. New /app/backend/tests/test_iter13_billing_presets.py: 13 passed, 1 skipped (admin is starter — gating already proven by starter test), 1 FAILED. The failure is a real backend bug: GET /api/billing/status/{session_id} returns HTTP 500 instead of a graceful response when the emergent Stripe wrapper raises CheckoutError (session not retrievable). Frontend: /pricing renders publicly, FREE badge in sidebar correct for admin (starter), Upgrade-to-Pro button on /pricing POSTs /billing/checkout 200, New-Allocation step 3 renders the 6 built-in preset chips with the exact testids requested (apply-preset-{id}), xero preset shows a graceful 'fields not found' toast, '+ Save as profile' panel opens for starter. Quota: 5001+ row run cleanly rejected with 402 detail.code=QUOTA_EXCEEDED; sub-5k run succeeds and row_usage_this_month increments correctly.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "GET /api/billing/status/{session_id}",
+        "issue": "Returns HTTP 500 (Internal Server Error) when StripeCheckout.get_checkout_status raises CheckoutError. Reproduced with a session_id created in the same call to POST /api/billing/checkout. Backend log: `emergentintegrations.payments.stripe.checkout.CheckoutError: Failed to retrieve session status: ... No such checkout.session: cs_test_...`. The endpoint should wrap the call in try/except and either (a) return the cached transaction with payment_status='pending' and a soft warning, or (b) raise HTTPException(502) with a readable detail. As-is, /billing/success polling on the frontend will crash with 500 every poll until the Stripe session becomes retrievable. Likely root cause: STRIPE_API_KEY='sk_test_emergent' is a placeholder; create_checkout_session returns a synthesised cs_test_* id that the emergent Stripe wrapper cannot later look up via its `retrieve` call (possibly different upstream key path between create vs. get). Either set a real test key in backend/.env or harden the endpoint to tolerate retrieve failures.",
+        "priority": "HIGH"
+      }
+    ],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter13_billing_presets.py",
+    "/app/test_reports/pytest/iter13.xml"
+  ],
+  "action_items": [
+    "(HIGH) Wrap stripe.get_checkout_status(session_id) in try/except CheckoutError in server.py::billing_status (line 866). Return cached tx with current payment_status, or raise HTTPException(502, detail='Stripe session not yet available, retry'). This unblocks the /billing/success polling page from crashing every 3s.",
+    "(HIGH) Resolve STRIPE_API_KEY='sk_test_emergent' — create_checkout_session works but get_checkout_status fails with 'No such checkout.session'. Confirm the emergent Stripe wrapper actually supports retrieve with this key, or replace with a real Stripe test key (sk_test_...) in backend/.env.",
+    "(LOW) Add a data-testid on profile-label-input / profile-save-confirm inside the Save-as-profile panel so future automated tests can confirm the Pro-gate toast text deterministically (currently the panel opens but lacks stable selectors)."
+  ],
+  "critical_code_review_comments": [
+    "server.py:865-866 — billing_status has no try/except around stripe.get_checkout_status; any upstream Stripe outage or stale session triggers a 500. Easy hardening: try/except CheckoutError → return cached tx.",
+    "server.py:828 _apply_paid_subscription is idempotent only for first paid transition (guarded by `tx['payment_status'] != 'paid'`) — good. But _apply_paid_subscription itself can also be called from the Stripe webhook; if both webhook and status-poll race, the `cur > now` stacking branch protects against double-grant — verified by code review.",
+    "server.py:970-985 save_preset returns 402 for starter — correct gating. Detail message is human-friendly ('Saving mapping profiles is a Pro feature. Upgrade at /pricing.').",
+    "server.py:1116-1129 quota check happens BEFORE row processing — efficient. 402 detail.code=QUOTA_EXCEEDED with limit + used + would_add fields — frontend 402 interceptor can render upgrade CTA. Verified live.",
+    "server.py:1213-1232 — /rows server-side search uses re.escape (injection-safe) and case-insensitive regex on reference/payer/matches.invoice_number/matches.invoice_debtor for bank, number/debtor for invoice. Verified filtering works across all four search target fields.",
+    "Pricing.jsx upgrade-btn testid is 'upgrade-btn' (not 'upgrade-pro-monthly' as written in the test brief). Documenting for future testers; not a bug."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter13_billing_presets.py (new — 15 tests covering billing plan/checkout/status, mapping presets list+gating, quota over/under 5000, async-search on /rows for both unmatched buckets)"
+  ],
+  "success_rate": {
+    "backend": "13/15 (86.6%) — 1 skipped (admin starter; gating proven by starter user test), 1 failed (real 500 on /billing/status — see action items)",
+    "frontend": "100% on tested flows — /pricing public, FREE badge sidebar, upgrade button → POST /billing/checkout 200, step 3 renders 6 preset chips with correct testids, xero preset emits friendly toast, save-profile panel opens. ManualLinkDialog dual-search not asserted because the first allocation under admin has no unmatched rows; component code is unchanged from iter12 where dual-search-list was already verified."
+  },
+  "test_credentials": "admin@ebbusiness.com / Admin@2026! (verified) + freshly-registered TEST_starter_<uuid>@ebbiz.com / TestPass@2026! (created during run for quota+gating tests)",
+  "seed_data_creation": "Test run created: (a) a fresh starter user TEST_starter_<uuid>@ebbiz.com with 400 rows of usage logged for 2026-01; (b) a transient allocation 'TEST_search_<uuid>' (3 unmatched bank + 2 unmatched invoice) under admin tenant — auto-deleted via fixture teardown; (c) one allocation 'TEST_quota_small_<uuid>' under the starter tenant which remains (no admin-side delete API for cross-tenant). All artefacts are TEST_ prefixed.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "iter13 backend test file is /app/backend/tests/test_iter13_billing_presets.py — it is the authoritative regression suite for billing + presets + quota + search. Re-run after the /billing/status 500 is fixed; the existing test_status_endpoint will then pass. Note that the test currently keeps `TestBillingCheckout.session_id` on the class to share between checkout and status — this is fine but means tests must run in declaration order (pytest default). The starter user fixture is session-scoped: re-running in the same DB will create a new starter each session (no flake). The 6 built-in preset IDs are checked as a set; if main agent ever renames an ID, this test will fail loudly.",
+  "rca_of_the_issue": "Bug: GET /api/billing/status/{session_id} returns HTTP 500. Reproduction steps: (1) login as any user, (2) POST /api/billing/checkout {package_id:'pro_monthly', origin_url:<url>} — receive 200 with session_id 'cs_test_*', (3) immediately GET /api/billing/status/<session_id> — receive 500 with body 'Internal Server Error'. Backend trace: `await stripe.get_checkout_status(session_id)` raises emergentintegrations.payments.stripe.checkout.CheckoutError('Failed to retrieve session status: ... No such checkout.session: cs_test_<id>'). The exception escapes server.py:866 because there is no try/except. Mitigation: wrap with try/except CheckoutError; return cached `tx` doc with payment_status='pending' and updated_at=now; only update DB when Stripe returns successfully. Secondary RCA: STRIPE_API_KEY='sk_test_emergent' creates sessions that the same wrapper cannot subsequently retrieve — investigate emergentintegrations wrapper behaviour or switch to a real Stripe test key."
+}
