@@ -6,8 +6,18 @@
 ## Architecture
 - **Frontend:** React 19 + React Router v7 + Tailwind + shadcn/ui + sonner (`/app/frontend`)
 - **Backend:** FastAPI + motor + bcrypt + PyJWT + rapidfuzz + openpyxl + BackgroundTasks (`/app/backend`)
-- **DB:** MongoDB — `users`, `allocation_runs`, `audit_logs`, `login_attempts`
-- **Auth:** JWT (httpOnly cookies, 12h access + 7d refresh), multi-tenant via `user_id` scoping on every record
+- **DB:** MongoDB:
+  - `users` — auth
+  - `allocation_runs` — run headers + stats only (no rows; bypasses 16 MB BSON limit)
+  - `allocation_bank_rows` / `allocation_invoice_rows` — per-row storage, scoped by run_id + user_id, indexed on (run_id, user_id, status / idx / id)
+  - `audit_logs`
+- **Auth:** JWT (Bearer header via `Authorization: Bearer <token>`, token in `localStorage['ebrr_access_token']`; httpOnly cookies as fallback). 7-day access / 30-day refresh.
+
+## Scalability
+- **Matching engine:** Pass 1 invoice ref (regex + suffix-digit) → Pass 2 fuzzy debtor (rapidfuzz `process.extract` + WRatio with `default_process`, ≥70) with **inverted distinctive-token index** for pre-filtering → Pass 2.5 token-substring fallback. 800 bank × 29 000 invoices runs end-to-end in ~4 seconds.
+- **Async processing** for runs > 2000 rows on either side. FastAPI BackgroundTasks; frontend polls `/allocations/{id}` every 2s.
+- **Paginated detail:** `GET /api/allocations/{id}/rows?bucket=...&page=...&page_size=...&search=...` (page_size capped 500; regex-escaped search).
+- **Streaming exports:** CSV + Excel iterate async Mongo cursors row-by-row.
 
 ## User personas
 - Finance / AR analyst at an SME closing monthly receivables
