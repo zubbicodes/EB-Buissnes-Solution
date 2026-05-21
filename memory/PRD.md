@@ -48,7 +48,14 @@
 
 ## Implemented
 - [x] Landing page (green/blue branded, "Receivables Reconciliation Platform" everywhere)
-- [x] Sign In / Sign Up with httpOnly JWT cookies
+- [x] **Public Pricing page** (/pricing) — Starter free + Pro £49/mo via Stripe Checkout (test mode key `sk_test_emergent`)
+- [x] **Plan badge in sidebar** — Pro (gradient) / Free (slate) chip linking to /pricing
+- [x] **Quota enforcement** — Starter capped at 5,000 rows / month combined; runs over the limit return HTTP 402 with a friendly `Upgrade to Pro` toast (axios interceptor)
+- [x] **Stripe Checkout + status polling** — POST /api/billing/checkout, GET /api/billing/status/{sid} (fault-tolerant), POST /api/webhook/stripe; payment_transactions collection
+- [x] **CSV mapping presets** (6 built-in: Barclays / HSBC / Lloyds / Xero / Sage / QuickBooks)
+- [x] **Saved column-mapping profiles** (Pro-only — 402 gated)
+- [x] **Async-search ManualLinkDialog** — debounced search input on both bank and invoice sides, server-side pagination via /rows
+- [x] Sign In / Sign Up with Bearer JWT (localStorage) + httpOnly cookie fallback
 - [x] Dashboard (runs table + 4 stat cards + delete-with-audit)
 - [x] 4-step New Allocation wizard (Details → Bank CSV → Invoice CSV+Mapping → Validate & Run)
   - [x] Drag-and-drop dropzone (file size & extension guarded, 25 MB cap)

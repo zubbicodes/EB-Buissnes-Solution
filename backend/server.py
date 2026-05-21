@@ -863,7 +863,14 @@ async def billing_status(session_id: str, request: Request, current=Depends(get_
     host = str(request.base_url).rstrip("/")
     webhook_url = f"{host}/api/webhook/stripe"
     stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
-    cs = await stripe.get_checkout_status(session_id)
+
+    # Stripe sometimes returns "No such checkout.session" while the session is still propagating —
+    # treat any retrieve failure as a transient "still pending" rather than 500.
+    try:
+        cs = await stripe.get_checkout_status(session_id)
+    except Exception as e:
+        logger.warning("Stripe status retrieval transient failure for %s: %s", session_id, e)
+        return {**tx, "transient_error": str(e)[:120]}
 
     new_status = "complete" if cs.status == "complete" else cs.status
     new_payment_status = cs.payment_status
