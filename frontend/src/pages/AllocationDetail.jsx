@@ -265,62 +265,108 @@ function Pagination({ page, total, pageSize, onChange }) {
   );
 }
 
-function BankTable({ rows, showLink, onLink }) {
+function BankTable({ rows, showLink, onLink, onReview }) {
   if (rows.length === 0) return <Empty label="No rows in this bucket." />;
+  // Explode: one display row per (bank, match) pair. Unmatched bank rows render once with no match info.
+  const exploded = [];
+  rows.forEach((b) => {
+    const matches = b.matches || [];
+    if (matches.length === 0) {
+      exploded.push({ b, m: null, isFirst: true, count: 1, idx: 0 });
+    } else {
+      matches.forEach((m, idx) => {
+        exploded.push({ b, m, isFirst: idx === 0, count: matches.length, idx });
+      });
+    }
+  });
   return (
-    <div className="bg-white border border-slate-200 rounded-md overflow-hidden" data-testid="bank-table">
-      <table className="w-full text-sm">
+    <div className="bg-white border border-slate-200 rounded-md overflow-x-auto scroll-area-thin" data-testid="bank-table">
+      <table className="w-full text-sm min-w-[1200px]">
         <thead className="bg-slate-50 text-xs uppercase tracking-wider text-slate-600">
           <tr>
-            <Th>Date</Th><Th>Reference</Th><Th>Payer</Th>
-            <Th right>Amount</Th><Th right>Allocated</Th><Th right>Remaining</Th>
-            <Th>Matched Invoices</Th><Th>Why matched?</Th><Th>Conf.</Th>
+            <Th>Date</Th>
+            <Th>Bank reference</Th>
+            <Th>Payer</Th>
+            <Th right>Bank amount</Th>
+            <Th>Invoice #</Th>
+            <Th>Debtor</Th>
+            <Th right>Invoice amt</Th>
+            <Th right>Allocated</Th>
+            <Th right>Outstanding</Th>
+            <Th>Match reason</Th>
+            <Th>Conf.</Th>
             {showLink && <Th />}
           </tr>
         </thead>
         <tbody>
-          {rows.map((b) => {
-            const allocated = (b.matches || []).reduce((s, m) => s + m.amount, 0);
-            const hasAmbiguous = (b.matches || []).some((m) => m.ambiguous);
-            const lowConfPartial = b.status === "partial" && b.confidence === "low";
+          {exploded.map((e, ei) => {
+            const { b, m, isFirst, count, idx } = e;
+            const hasAmbiguous = m?.ambiguous;
+            const lowConf = m?.confidence === "low";
+            const topBorder = isFirst ? "border-t-2 border-slate-300" : "border-t border-slate-100";
             return (
-              <tr key={b.id} className="border-t border-slate-100 hover:bg-slate-50/60 align-top">
-                <td className="px-3 py-2 text-slate-500">{b.date || "—"}</td>
-                <td className="px-3 py-2 font-mono text-xs">{b.reference || "—"}</td>
-                <td className="px-3 py-2">{b.payer || "—"}</td>
-                <td className="px-3 py-2 text-right tabular-nums font-semibold">{fmtGBP(b.amount)}</td>
-                <td className="px-3 py-2 text-right tabular-nums text-emerald-700">{fmtGBP(allocated)}</td>
-                <td className="px-3 py-2 text-right tabular-nums text-slate-600">{fmtGBP(b.remaining)}</td>
-                <td className="px-3 py-2 text-xs">
-                  {(b.matches || []).length === 0 ? <span className="text-slate-400">—</span> :
-                    b.matches.map((m, i) => (
-                      <div key={i} className="text-slate-700">
-                        <span className="font-semibold">{m.invoice_number || "?"}</span>
-                        <span className="text-slate-400"> · {fmtGBP(m.amount)} · {m.method}{m.score ? ` ${m.score}%` : ""}</span>
+              <tr key={`${b.id}-${idx}`} className={`${topBorder} hover:bg-slate-50/60 align-top cursor-pointer`}
+                  onClick={() => onReview?.(b)}
+                  data-testid={`row-${b.id}-${idx}`}>
+                <td className="px-3 py-2 text-slate-500">{isFirst ? (b.date || "—") : ""}</td>
+                <td className="px-3 py-2 font-mono text-xs">{isFirst ? (b.reference || "—") : <span className="text-slate-300">↳</span>}</td>
+                <td className="px-3 py-2">{isFirst ? (b.payer || "—") : ""}</td>
+                <td className="px-3 py-2 text-right tabular-nums font-semibold">
+                  {isFirst ? fmtGBP(b.amount) : ""}
+                  {isFirst && count > 1 && <div className="text-[10px] text-slate-400 font-normal">{count} matches</div>}
+                </td>
+                {m ? (
+                  <>
+                    <td className="px-3 py-2 font-mono text-xs">{m.invoice_number || "?"}</td>
+                    <td className="px-3 py-2 text-xs text-slate-600">{m.invoice_debtor || "—"}</td>
+                    <td className="px-3 py-2 text-right tabular-nums text-xs text-slate-500">
+                      {/* Invoice amount/outstanding aren't part of match — show a dash. The review panel shows full detail. */}
+                      —
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-emerald-700 font-semibold">{fmtGBP(m.amount)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums text-slate-600">
+                      {isFirst ? fmtGBP(b.remaining) : ""}
+                    </td>
+                    <td className="px-3 py-2 text-xs text-slate-700 max-w-sm">
+                      <div className="flex items-start gap-1">
+                        {(hasAmbiguous || lowConf) && (
+                          <AlertTriangle className="h-3.5 w-3.5 text-amber-600 mt-0.5 shrink-0" />
+                        )}
+                        <span>{m.reason || "—"}</span>
                       </div>
-                    ))}
-                </td>
-                <td className="px-3 py-2 text-xs text-slate-600 max-w-xs">
-                  <div className="flex items-start gap-1">
-                    {(hasAmbiguous || lowConfPartial) && (
-                      <AlertTriangle className="h-3.5 w-3.5 text-amber-600 mt-0.5 shrink-0" />
-                    )}
-                    <span>{b.reason || "—"}</span>
-                  </div>
-                </td>
-                <td className="px-3 py-2">
-                  {b.confidence && (
-                    <span className={`text-[10px] px-2 py-0.5 rounded-full border ${CONF_COLOUR[b.confidence] || "bg-slate-100 text-slate-600 border-slate-200"}`}>
-                      {b.confidence}
-                    </span>
-                  )}
-                </td>
+                    </td>
+                    <td className="px-3 py-2">
+                      {m.confidence && (
+                        <span className={`text-[10px] px-2 py-0.5 rounded-full border ${CONF_COLOUR[m.confidence] || "bg-slate-100 text-slate-600 border-slate-200"}`}>
+                          {m.confidence}
+                        </span>
+                      )}
+                    </td>
+                  </>
+                ) : (
+                  <>
+                    <td className="px-3 py-2 text-slate-300">—</td>
+                    <td className="px-3 py-2 text-slate-300">—</td>
+                    <td className="px-3 py-2 text-slate-300">—</td>
+                    <td className="px-3 py-2 text-slate-300">—</td>
+                    <td className="px-3 py-2 text-right tabular-nums text-slate-600">{fmtGBP(b.remaining)}</td>
+                    <td className="px-3 py-2 text-xs text-slate-700 max-w-sm">
+                      <div className="flex items-start gap-1">
+                        <AlertTriangle className="h-3.5 w-3.5 text-rose-600 mt-0.5 shrink-0" />
+                        <span>{b.reason || "—"}</span>
+                      </div>
+                    </td>
+                    <td className="px-3 py-2"><span className="text-[10px] px-2 py-0.5 rounded-full border bg-rose-100 text-rose-800 border-rose-200">unmatched</span></td>
+                  </>
+                )}
                 {showLink && (
-                  <td className="px-3 py-2 text-right">
-                    <button onClick={() => onLink(b.id)} data-testid={`link-bank-${b.id}`}
-                      className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-700 hover:text-emerald-900">
-                      <Link2 className="h-3.5 w-3.5" /> Link manually
-                    </button>
+                  <td className="px-3 py-2 text-right" onClick={(e) => e.stopPropagation()}>
+                    {isFirst && !m && (
+                      <button onClick={() => onLink(b.id)} data-testid={`link-bank-${b.id}`}
+                        className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-700 hover:text-emerald-900">
+                        <Link2 className="h-3.5 w-3.5" /> Link
+                      </button>
+                    )}
                   </td>
                 )}
               </tr>
@@ -328,6 +374,118 @@ function BankTable({ rows, showLink, onLink }) {
           })}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+function ReviewPanel({ bank, onClose }) {
+  if (!bank) return null;
+  const matches = bank.matches || [];
+  const totalAllocated = matches.reduce((s, m) => s + m.amount, 0);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4" data-testid="review-panel">
+      <div className="bg-white rounded-md border border-slate-200 max-w-3xl w-full p-6 max-h-[90vh] overflow-y-auto">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-700">Allocation review</div>
+            <h3 className="font-display font-semibold text-xl mt-1">{bank.reference || "(no reference)"}</h3>
+            <div className="text-sm text-slate-500 mt-1">
+              {bank.payer || "—"} · {bank.date || "no date"} · <span className="font-semibold text-slate-700">{fmtGBP(bank.amount)}</span>
+            </div>
+          </div>
+          <button onClick={onClose} data-testid="review-close" className="text-slate-400 hover:text-slate-700 text-2xl leading-none">×</button>
+        </div>
+
+        <div className="mt-6 grid sm:grid-cols-3 gap-3">
+          <ReviewStat label="Bank amount" value={fmtGBP(bank.amount)} />
+          <ReviewStat label="Total allocated" value={fmtGBP(totalAllocated)} tone="emerald" />
+          <ReviewStat label="Remaining" value={fmtGBP(bank.remaining)} tone={bank.remaining > 0.005 ? "amber" : "slate"} />
+        </div>
+
+        <div className="mt-6">
+          <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">Evidence collected</div>
+          <div className="space-y-2 text-sm">
+            <ReviewLine label="Status" value={
+              <span className={`text-xs px-2 py-0.5 rounded-full border ${
+                bank.status === "full" ? "bg-emerald-100 text-emerald-800 border-emerald-200" :
+                bank.status === "partial" ? "bg-amber-100 text-amber-800 border-amber-200" :
+                "bg-rose-100 text-rose-800 border-rose-200"
+              }`}>{bank.status}{bank.confidence ? ` · ${bank.confidence}` : ""}</span>
+            } />
+            <ReviewLine label="Extracted references" value={
+              (bank.extracted_refs && bank.extracted_refs.length)
+                ? <span className="font-mono">{bank.extracted_refs.join(", ")}</span>
+                : <span className="text-slate-400 italic">None detected in bank text</span>
+            } />
+            <ReviewLine label="Best debtor name similarity" value={
+              bank.best_debtor_score != null
+                ? <span>{bank.best_debtor_score}% {bank.best_debtor_score < 70 ? "(below match threshold)" : ""}</span>
+                : <span className="text-slate-400 italic">Not evaluated (reference match took priority)</span>
+            } />
+            <ReviewLine label="Amount balancing" value={
+              bank.remaining <= 0.005
+                ? <span className="text-emerald-700">Fully allocated — bank amount equals sum of matched invoices</span>
+                : <span className="text-amber-700">{fmtGBP(bank.remaining)} of {fmtGBP(bank.amount)} remains unallocated — no additional matches added (strict hierarchy)</span>
+            } />
+            <ReviewLine label="Overall reasoning" value={<span>{bank.reason || "—"}</span>} />
+          </div>
+        </div>
+
+        <div className="mt-6">
+          <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">
+            Matched invoices ({matches.length})
+          </div>
+          {matches.length === 0 ? (
+            <Empty label="No invoices matched — use Link manually to assign one." />
+          ) : (
+            <div className="border border-slate-200 rounded-md divide-y divide-slate-100">
+              {matches.map((m, i) => (
+                <div key={i} className="p-3" data-testid={`review-match-${i}`}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="font-mono text-sm font-semibold">{m.invoice_number || "?"}</div>
+                      <div className="text-xs text-slate-500">{m.invoice_debtor || "—"}</div>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <div className="text-sm font-semibold tabular-nums text-emerald-700">{fmtGBP(m.amount)}</div>
+                      <span className={`text-[10px] px-2 py-0.5 rounded-full border ${CONF_COLOUR[m.confidence] || "bg-slate-100 text-slate-600 border-slate-200"}`}>
+                        {m.confidence}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="mt-2 text-xs text-slate-700 flex items-start gap-1">
+                    {m.ambiguous && <AlertTriangle className="h-3.5 w-3.5 text-amber-600 mt-0.5 shrink-0" />}
+                    <span>{m.reason}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ReviewStat({ label, value, tone }) {
+  const map = {
+    emerald: "border-emerald-200 bg-emerald-50 text-emerald-800",
+    amber: "border-amber-200 bg-amber-50 text-amber-800",
+    slate: "border-slate-200 bg-slate-50 text-slate-700",
+  };
+  return (
+    <div className={`rounded-md border p-3 ${tone ? map[tone] : "border-slate-200 bg-slate-50 text-slate-700"}`}>
+      <div className="text-[10px] uppercase tracking-wider font-semibold">{label}</div>
+      <div className="font-display font-bold text-lg mt-0.5 tabular-nums">{value}</div>
+    </div>
+  );
+}
+
+function ReviewLine({ label, value }) {
+  return (
+    <div className="flex items-start gap-3">
+      <div className="w-44 text-xs font-semibold uppercase tracking-wider text-slate-500 shrink-0 mt-0.5">{label}</div>
+      <div className="text-sm flex-1">{value}</div>
     </div>
   );
 }
