@@ -466,6 +466,7 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
                 None,
             )
             ref_kind = "exact" if normalized_bank_ref == inv["number_norm"] else "partial"
+            outstanding_before = inv["remaining"]
             b["remaining"] = round(b["remaining"] - alloc, 2)
             inv["remaining"] = round(inv["remaining"] - alloc, 2)
             link = {
@@ -476,10 +477,13 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
                 "ref_kind": ref_kind,
                 "confidence": "high" if ref_kind == "exact" else "medium",
                 "reason": (
-                    f"Exact invoice reference '{inv['number']}' detected in bank text"
+                    f"Exact invoice reference detected ('{inv['number']}')"
                     if ref_kind == "exact"
-                    else f"Partial invoice reference '{inv['number']}' detected in bank text (suffix match)"
+                    else f"Partial invoice reference detected ('{inv['number']}' suffix match)"
                 ),
+                "invoice_amount": inv["amount"],
+                "invoice_outstanding_before": outstanding_before,
+                "invoice_outstanding_after": inv["remaining"],
             }
             b["matches"].append(link)
             inv["matches"].append(link)
@@ -529,6 +533,7 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
             alloc = round(min(b["remaining"], inv["remaining"]), 2)
             if alloc <= 0:
                 continue
+            outstanding_before = inv["remaining"]
             b["remaining"] = round(b["remaining"] - alloc, 2)
             inv["remaining"] = round(inv["remaining"] - alloc, 2)
             confidence = "high" if score >= 95 else "medium" if score >= 85 else "low"
@@ -542,6 +547,9 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
                 "ambiguous": plausible_count > 1,
                 "reason": f"Debtor name similarity {round(score, 1)}%"
                           + (f" — {plausible_count} plausible candidates" if plausible_count > 1 else " — unique candidate"),
+                "invoice_amount": inv["amount"],
+                "invoice_outstanding_before": outstanding_before,
+                "invoice_outstanding_after": inv["remaining"],
             }
             b["matches"].append(link)
             inv["matches"].append(link)
@@ -581,6 +589,7 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
             alloc = round(min(b["remaining"], inv["remaining"]), 2)
             if alloc <= 0:
                 continue
+            outstanding_before = inv["remaining"]
             b["remaining"] = round(b["remaining"] - alloc, 2)
             inv["remaining"] = round(inv["remaining"] - alloc, 2)
             link = {
@@ -591,8 +600,11 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
                 "confidence": "low",
                 "score": round(score, 1),
                 "ambiguous": plausible_count > 1,
-                "reason": f"{hits}/{total_toks} distinctive debtor tokens found in bank text"
+                "reason": f"Token-substring match ({hits}/{total_toks} distinctive debtor tokens found in bank text, low confidence — review required)"
                           + (f" — {plausible_count} plausible candidates" if plausible_count > 1 else ""),
+                "invoice_amount": inv["amount"],
+                "invoice_outstanding_before": outstanding_before,
+                "invoice_outstanding_after": inv["remaining"],
             }
             b["matches"].append(link)
             inv["matches"].append(link)
@@ -630,8 +642,14 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
             b["status"] = "full"
             reason_parts = []
             if rule_a:
-                refs = ", ".join(sorted({m.get("reason", "").split("'")[1] for m in ref_methods if "'" in m.get("reason", "")}))
-                reason_parts.append(f"Invoice reference{'s' if len(ref_methods) > 1 else ''} {refs} matched and exact amount consumed")
+                # Pull invoice numbers from match links (now standardised after the reason wording change)
+                inv_nums = sorted({m.get("invoice_number") for m in ref_methods if m.get("invoice_number")})
+                refs = ", ".join(inv_nums) if inv_nums else ""
+                reason_parts.append(
+                    f"Invoice reference{'s' if len(ref_methods) > 1 else ''}"
+                    + (f" {refs}" if refs else "")
+                    + " matched and bank amount fully consumed"
+                )
             if rule_b:
                 m = debtor_name_methods[0]
                 reason_parts.append(f"Unique debtor match at {m['score']}% with exact amount")
@@ -1398,9 +1416,12 @@ async def manual_link(run_id: str, payload: ManualLinkIn, current=Depends(get_cu
     link = {
         "bank_id": bank["id"], "invoice_id": inv["id"], "amount": amt,
         "method": "manual", "confidence": "manual",
-        "reason": "Manually linked by user",
+        "reason": "Manual allocation",
         "invoice_number": inv.get("number"),
         "invoice_debtor": inv.get("debtor"),
+        "invoice_amount": inv.get("amount"),
+        "invoice_outstanding_before": inv["remaining"],
+        "invoice_outstanding_after": round(inv["remaining"] - amt, 2),
     }
     bank.setdefault("matches", []).append(link)
     inv.setdefault("matches", []).append(link)

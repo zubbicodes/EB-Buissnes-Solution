@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from "react";
 import { useParams, Link } from "react-router-dom";
 import { api, API_BASE, fmtGBP, formatError } from "@/lib/api";
 import { toast } from "sonner";
-import { ArrowLeft, Download, Link2, GripVertical, AlertTriangle, FileSpreadsheet, ChevronLeft, ChevronRight, Search } from "lucide-react";
+import { ArrowLeft, Download, Link2, AlertTriangle, FileSpreadsheet, ChevronLeft, ChevronRight, Search, Eye, ArrowRight } from "lucide-react";
 
 const TABS = [
   { id: "full", label: "Confirmed" },
@@ -33,6 +33,7 @@ export default function AllocationDetail() {
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [tabLoading, setTabLoading] = useState(false);
+  const [review, setReview] = useState(null); // bank row being reviewed in the side-panel
 
   const loadHeader = useCallback(async () => {
     try {
@@ -203,10 +204,10 @@ export default function AllocationDetail() {
       )}
 
       {(tab === "full" || tab === "partial") && (
-        <BankTable rows={tabData.rows} showLink={false} />
+        <BankTable rows={tabData.rows} showLink={false} onReview={setReview} />
       )}
       {tab === "unmatched_bank" && (
-        <BankTable rows={tabData.rows} showLink={true} onLink={(bankId) => setLinkDialog({ bankId })} />
+        <BankTable rows={tabData.rows} showLink={true} onLink={(bankId) => setLinkDialog({ bankId })} onReview={setReview} />
       )}
       {tab === "unmatched_invoice" && (
         <InvoiceTable rows={tabData.rows} onLink={(invoiceId) => setLinkDialog({ invoiceId })} />
@@ -215,6 +216,10 @@ export default function AllocationDetail() {
 
       {tab !== "audit" && tabData.total > PAGE_SIZE && (
         <Pagination page={page} total={tabData.total} pageSize={PAGE_SIZE} onChange={setPage} />
+      )}
+
+      {review && (
+        <ReviewPanel bank={review} onClose={() => setReview(null)} />
       )}
 
       {linkDialog && (
@@ -281,7 +286,7 @@ function BankTable({ rows, showLink, onLink, onReview }) {
   });
   return (
     <div className="bg-white border border-slate-200 rounded-md overflow-x-auto scroll-area-thin" data-testid="bank-table">
-      <table className="w-full text-sm min-w-[1200px]">
+      <table className="w-full text-sm min-w-[1400px]">
         <thead className="bg-slate-50 text-xs uppercase tracking-wider text-slate-600">
           <tr>
             <Th>Date</Th>
@@ -295,18 +300,20 @@ function BankTable({ rows, showLink, onLink, onReview }) {
             <Th right>Outstanding</Th>
             <Th>Match reason</Th>
             <Th>Conf.</Th>
+            <Th right>Review</Th>
             {showLink && <Th />}
           </tr>
         </thead>
         <tbody>
-          {exploded.map((e, ei) => {
+          {exploded.map((e) => {
             const { b, m, isFirst, count, idx } = e;
             const hasAmbiguous = m?.ambiguous;
             const lowConf = m?.confidence === "low";
             const topBorder = isFirst ? "border-t-2 border-slate-300" : "border-t border-slate-100";
+            const handleRowClick = () => onReview?.(b);
             return (
-              <tr key={`${b.id}-${idx}`} className={`${topBorder} hover:bg-slate-50/60 align-top cursor-pointer`}
-                  onClick={() => onReview?.(b)}
+              <tr key={`${b.id}-${idx}`} className={`${topBorder} hover:bg-slate-50/60 align-top cursor-pointer transition-colors`}
+                  onClick={handleRowClick}
                   data-testid={`row-${b.id}-${idx}`}>
                 <td className="px-3 py-2 text-slate-500">{isFirst ? (b.date || "—") : ""}</td>
                 <td className="px-3 py-2 font-mono text-xs">{isFirst ? (b.reference || "—") : <span className="text-slate-300">↳</span>}</td>
@@ -317,15 +324,26 @@ function BankTable({ rows, showLink, onLink, onReview }) {
                 </td>
                 {m ? (
                   <>
-                    <td className="px-3 py-2 font-mono text-xs">{m.invoice_number || "?"}</td>
+                    <td className="px-3 py-2 font-mono text-xs" data-testid={`match-${b.id}-${idx}-invnum`}>{m.invoice_number || "?"}</td>
                     <td className="px-3 py-2 text-xs text-slate-600">{m.invoice_debtor || "—"}</td>
-                    <td className="px-3 py-2 text-right tabular-nums text-xs text-slate-500">
-                      {/* Invoice amount/outstanding aren't part of match — show a dash. The review panel shows full detail. */}
-                      —
+                    <td className="px-3 py-2 text-right tabular-nums text-xs text-slate-600" data-testid={`match-${b.id}-${idx}-invamt`}>
+                      {m.invoice_amount != null ? fmtGBP(m.invoice_amount) : <span className="text-slate-300">—</span>}
                     </td>
-                    <td className="px-3 py-2 text-right tabular-nums text-emerald-700 font-semibold">{fmtGBP(m.amount)}</td>
-                    <td className="px-3 py-2 text-right tabular-nums text-slate-600">
-                      {isFirst ? fmtGBP(b.remaining) : ""}
+                    <td className="px-3 py-2 text-right tabular-nums text-emerald-700 font-semibold" data-testid={`match-${b.id}-${idx}-allocated`}>
+                      {fmtGBP(m.amount)}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-xs" data-testid={`match-${b.id}-${idx}-outstanding`}>
+                      {m.invoice_outstanding_before != null && m.invoice_outstanding_after != null ? (
+                        <span className="inline-flex items-center gap-1">
+                          <span className="text-slate-500">{fmtGBP(m.invoice_outstanding_before)}</span>
+                          <ArrowRight className="h-3 w-3 text-slate-400 shrink-0" />
+                          <span className={m.invoice_outstanding_after <= 0.005 ? "text-emerald-700 font-semibold" : "text-amber-700 font-semibold"}>
+                            {fmtGBP(m.invoice_outstanding_after)}
+                          </span>
+                        </span>
+                      ) : (
+                        <span className="text-slate-300">—</span>
+                      )}
                     </td>
                     <td className="px-3 py-2 text-xs text-slate-700 max-w-sm">
                       <div className="flex items-start gap-1">
@@ -359,8 +377,16 @@ function BankTable({ rows, showLink, onLink, onReview }) {
                     <td className="px-3 py-2"><span className="text-[10px] px-2 py-0.5 rounded-full border bg-rose-100 text-rose-800 border-rose-200">unmatched</span></td>
                   </>
                 )}
+                <td className="px-3 py-2 text-right" onClick={(ev) => ev.stopPropagation()}>
+                  {isFirst && (
+                    <button onClick={handleRowClick} data-testid={`review-bank-${b.id}`}
+                      className="inline-flex items-center gap-1 text-xs font-semibold text-slate-600 hover:text-emerald-700 transition-colors">
+                      <Eye className="h-3.5 w-3.5" /> Review
+                    </button>
+                  )}
+                </td>
                 {showLink && (
-                  <td className="px-3 py-2 text-right" onClick={(e) => e.stopPropagation()}>
+                  <td className="px-3 py-2 text-right" onClick={(ev) => ev.stopPropagation()}>
                     {isFirst && !m && (
                       <button onClick={() => onLink(b.id)} data-testid={`link-bank-${b.id}`}
                         className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-700 hover:text-emerald-900">
@@ -445,6 +471,11 @@ function ReviewPanel({ bank, onClose }) {
                     <div className="min-w-0">
                       <div className="font-mono text-sm font-semibold">{m.invoice_number || "?"}</div>
                       <div className="text-xs text-slate-500">{m.invoice_debtor || "—"}</div>
+                      {m.invoice_amount != null && (
+                        <div className="text-[11px] text-slate-500 mt-1">
+                          Invoice amount <span className="font-semibold text-slate-700 tabular-nums">{fmtGBP(m.invoice_amount)}</span>
+                        </div>
+                      )}
                     </div>
                     <div className="text-right shrink-0">
                       <div className="text-sm font-semibold tabular-nums text-emerald-700">{fmtGBP(m.amount)}</div>
@@ -453,6 +484,16 @@ function ReviewPanel({ bank, onClose }) {
                       </span>
                     </div>
                   </div>
+                  {m.invoice_outstanding_before != null && m.invoice_outstanding_after != null && (
+                    <div className="mt-2 text-[11px] text-slate-500 flex items-center gap-1.5">
+                      <span>Outstanding</span>
+                      <span className="font-semibold text-slate-700 tabular-nums">{fmtGBP(m.invoice_outstanding_before)}</span>
+                      <ArrowRight className="h-3 w-3 text-slate-400" />
+                      <span className={`font-semibold tabular-nums ${m.invoice_outstanding_after <= 0.005 ? "text-emerald-700" : "text-amber-700"}`}>
+                        {fmtGBP(m.invoice_outstanding_after)}
+                      </span>
+                    </div>
+                  )}
                   <div className="mt-2 text-xs text-slate-700 flex items-start gap-1">
                     {m.ambiguous && <AlertTriangle className="h-3.5 w-3.5 text-amber-600 mt-0.5 shrink-0" />}
                     <span>{m.reason}</span>

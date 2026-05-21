@@ -78,7 +78,31 @@ def _run(client, bank_csv, invoice_csv, name="TEST_strict"):
     }
     r = client.post(f"{BASE_URL}/api/allocations", json=payload, timeout=30)
     assert r.status_code == 200, f"create alloc failed: {r.status_code} {r.text}"
-    return r.json()
+    run = r.json()
+    # rows now live in split collections — fetch them all via paginated /rows endpoint
+    run["bank_rows"] = _fetch_all_bank_rows(client, run["id"])
+    return run
+
+
+def _fetch_all_bank_rows(client, run_id):
+    rows = []
+    for bucket in ("full", "partial", "unmatched_bank"):
+        page = 1
+        while True:
+            r = client.get(
+                f"{BASE_URL}/api/allocations/{run_id}/rows",
+                params={"bucket": bucket, "page": page, "page_size": 500},
+                timeout=30,
+            )
+            assert r.status_code == 200, f"rows fetch failed: {r.status_code} {r.text}"
+            body = r.json()
+            rows.extend(body.get("rows", []))
+            if len(rows) >= body.get("total", 0) or not body.get("rows"):
+                break
+            page += 1
+            if page > 50:
+                break
+    return rows
 
 
 def _find_bank(run, contains):
@@ -104,7 +128,7 @@ def test_full_pure_reference_exact_amount(client):
     assert b["status"] == "full", f"expected full, got {b['status']} reason={b.get('reason')}"
     assert b["confidence"] == "high"
     assert "Invoice reference" in b["reason"]
-    assert "matched and exact amount consumed" in b["reason"]
+    assert "fully consumed" in b["reason"]
     assert len(b["matches"]) == 1
     assert b["matches"][0]["method"] == "reference"
 
