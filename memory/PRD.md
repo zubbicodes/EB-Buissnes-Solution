@@ -55,6 +55,7 @@
 - [x] **CSV mapping presets** (6 built-in: Barclays / HSBC / Lloyds / Xero / Sage / QuickBooks)
 - [x] **Saved column-mapping profiles** (Pro-only — 402 gated)
 - [x] **Async-search ManualLinkDialog** — debounced search input on both bank and invoice sides, server-side pagination via /rows
+- [x] **Explainable Allocation Review Layer (Feb 2026)** — exploded rows (1 row per matched invoice), enriched match links carry `invoice_amount`, `invoice_outstanding_before`, `invoice_outstanding_after`, and a canonical reason string ('Exact invoice reference detected', 'Partial invoice reference detected', 'Debtor name similarity X%', 'Token-substring match (low confidence — review required)', 'Manual allocation'). UI Outstanding column shows `before → after` arrow. Strict hierarchy enforced: Pass-1 reference hits suppress Pass-2 + Pass-2.5; never pad with unrelated invoices for amount balancing. Dedicated Review button + whole-row click both open the Allocation Review Panel which shows original bank reference, extracted invoice references, debtor similarity score, amount balancing explanation, and per-match evidence cards.
 - [x] Sign In / Sign Up with Bearer JWT (localStorage) + httpOnly cookie fallback
 - [x] Dashboard (runs table + 4 stat cards + delete-with-audit)
 - [x] 4-step New Allocation wizard (Details → Bank CSV → Invoice CSV+Mapping → Validate & Run)

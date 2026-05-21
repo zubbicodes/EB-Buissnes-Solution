@@ -286,7 +286,7 @@ function BankTable({ rows, showLink, onLink, onReview }) {
   });
   return (
     <div className="bg-white border border-slate-200 rounded-md overflow-x-auto scroll-area-thin" data-testid="bank-table">
-      <table className="w-full text-sm min-w-[1400px]">
+      <table className="w-full text-sm min-w-[1320px]">
         <thead className="bg-slate-50 text-xs uppercase tracking-wider text-slate-600">
           <tr>
             <Th>Date</Th>
@@ -300,7 +300,7 @@ function BankTable({ rows, showLink, onLink, onReview }) {
             <Th right>Outstanding</Th>
             <Th>Match reason</Th>
             <Th>Conf.</Th>
-            <Th right>Review</Th>
+            <th className="px-2 py-2.5 text-right font-semibold w-10"><Eye className="h-3.5 w-3.5 inline text-slate-400" /></th>
             {showLink && <Th />}
           </tr>
         </thead>
@@ -377,11 +377,12 @@ function BankTable({ rows, showLink, onLink, onReview }) {
                     <td className="px-3 py-2"><span className="text-[10px] px-2 py-0.5 rounded-full border bg-rose-100 text-rose-800 border-rose-200">unmatched</span></td>
                   </>
                 )}
-                <td className="px-3 py-2 text-right" onClick={(ev) => ev.stopPropagation()}>
+                <td className="px-2 py-2 text-right" onClick={(ev) => ev.stopPropagation()}>
                   {isFirst && (
                     <button onClick={handleRowClick} data-testid={`review-bank-${b.id}`}
-                      className="inline-flex items-center gap-1 text-xs font-semibold text-slate-600 hover:text-emerald-700 transition-colors">
-                      <Eye className="h-3.5 w-3.5" /> Review
+                      title="Open review panel"
+                      className="inline-flex items-center justify-center h-6 w-6 rounded text-slate-500 hover:text-emerald-700 hover:bg-emerald-50 transition-colors">
+                      <Eye className="h-3.5 w-3.5" />
                     </button>
                   )}
                 </td>
