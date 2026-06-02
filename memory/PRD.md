@@ -48,14 +48,12 @@
 
 ## Implemented
 - [x] Landing page (green/blue branded, "Receivables Reconciliation Platform" everywhere)
-- [x] **Public Pricing page** (/pricing) — Starter free + Pro £49/mo via Stripe Checkout (test mode key `sk_test_emergent`)
-- [x] **Plan badge in sidebar** — Pro (gradient) / Free (slate) chip linking to /pricing
-- [x] **Quota enforcement** — Starter capped at 5,000 rows / month combined; runs over the limit return HTTP 402 with a friendly `Upgrade to Pro` toast (axios interceptor)
-- [x] **Stripe Checkout + status polling** — POST /api/billing/checkout, GET /api/billing/status/{sid} (fault-tolerant), POST /api/webhook/stripe; payment_transactions collection
 - [x] **CSV mapping presets** (6 built-in: Barclays / HSBC / Lloyds / Xero / Sage / QuickBooks)
-- [x] **Saved column-mapping profiles** (Pro-only — 402 gated)
+- [x] **Saved column-mapping profiles** (free for all users)
 - [x] **Async-search ManualLinkDialog** — debounced search input on both bank and invoice sides, server-side pagination via /rows
 - [x] **Explainable Allocation Review Layer (Feb 2026)** — exploded rows (1 row per matched invoice), enriched match links carry `invoice_amount`, `invoice_outstanding_before`, `invoice_outstanding_after`, and a canonical reason string ('Exact invoice reference detected', 'Partial invoice reference detected', 'Debtor name similarity X%', 'Token-substring match (low confidence — review required)', 'Manual allocation'). UI Outstanding column shows `before → after` arrow. Strict hierarchy enforced: Pass-1 reference hits suppress Pass-2 + Pass-2.5; never pad with unrelated invoices for amount balancing. Dedicated Review button + whole-row click both open the Allocation Review Panel which shows original bank reference, extracted invoice references, debtor similarity score, amount balancing explanation, and per-match evidence cards.
+- [x] **Large-allocation Excel export (Feb 2026)** — openpyxl write-only mode + WriteOnlyCell headers + chunked BytesIO streaming. 12,000 rows export in ~1.8s producing a valid 468KB .xlsx. No more OOM on 29k+ row runs.
+- [x] **Payment block removed (Feb 2026)** — Stripe / pricing / billing routes / quota enforcement / plan badge / 402 interceptor all stripped per product decision. Saved mapping profiles now free for all.
 - [x] Sign In / Sign Up with Bearer JWT (localStorage) + httpOnly cookie fallback
 - [x] Dashboard (runs table + 4 stat cards + delete-with-audit)
 - [x] 4-step New Allocation wizard (Details → Bank CSV → Invoice CSV+Mapping → Validate & Run)
