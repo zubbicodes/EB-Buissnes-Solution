@@ -86,18 +86,19 @@ export async function downloadAuthed(path, filename) {
   if (t) headers.Authorization = `Bearer ${t}`;
   const res = await fetch(url, { method: "GET", credentials: "include", headers });
   if (!res.ok) {
-    const ct = res.headers.get("content-type") || "";
     let detail = "";
     try {
-      if (ct.includes("application/json")) {
-        const body = await res.json();
-        detail = body?.detail || body?.message || JSON.stringify(body);
-      } else {
-        detail = await res.text();
+      const raw = await res.text();
+      try {
+        const j = JSON.parse(raw);
+        detail = j?.detail || j?.message || raw;
+      } catch {
+        detail = raw;
       }
     } catch {
       detail = `HTTP ${res.status}`;
     }
+    if (!detail) detail = `HTTP ${res.status}`;
     throw new Error(`Download failed (${res.status}): ${typeof detail === "string" ? detail : JSON.stringify(detail)}`);
   }
   const blob = await res.blob();
