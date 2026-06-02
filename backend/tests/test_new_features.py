@@ -65,6 +65,34 @@ FUZZY_MAPPING = {
 }
 
 
+def _fetch_all_rows(sess, run_id):
+    """Helper: load full bank/invoice row sets via paginated /rows."""
+    bank_rows = []
+    for bucket in ("full", "partial", "unmatched_bank"):
+        page = 1
+        while True:
+            r = sess.get(f"{API}/allocations/{run_id}/rows",
+                         params={"bucket": bucket, "page": page, "page_size": 500})
+            r.raise_for_status()
+            body = r.json()
+            bank_rows.extend(body.get("rows") or [])
+            if len(body.get("rows") or []) < 500:
+                break
+            page += 1
+    inv_rows = []
+    page = 1
+    while True:
+        r = sess.get(f"{API}/allocations/{run_id}/rows",
+                     params={"bucket": "unmatched_invoice", "page": page, "page_size": 500})
+        r.raise_for_status()
+        body = r.json()
+        inv_rows.extend(body.get("rows") or [])
+        if len(body.get("rows") or []) < 500:
+            break
+        page += 1
+    return bank_rows, inv_rows
+
+
 def test_fuzzy_matching_combined_reference_and_payer(sess):
     r = sess.post(f"{API}/allocations", json={
         "name": "TEST_Fuzzy", "period": "2026-01",
@@ -76,15 +104,10 @@ def test_fuzzy_matching_combined_reference_and_payer(sess):
     run_id = d["id"]
 
     # Get the run to inspect matches
-    g = sess.get(f"{API}/allocations/{run_id}").json()
-    bank_rows = g["bank_rows"]
-    inv_rows = g["invoice_rows"]
+    bank_rows, _inv_rows_unmatched = _fetch_all_rows(sess, run_id)
 
     def find_bank(snippet):
         return next(b for b in bank_rows if snippet in (b.get("reference") or ""))
-
-    def find_inv(num):
-        return next(i for i in inv_rows if i["number"] == num)
 
     # 1) INV-3001 BACS payment → reference pass matches Bright Sparks Ltd (high)
     b1 = find_bank("INV-3001")
@@ -191,7 +214,7 @@ def test_async_processing_large_run(sess):
 
 
 def test_small_run_is_synchronous(sess):
-    """Runs ≤5000 rows should return status=done immediately (no async)."""
+    """Small runs should return status=done immediately (no async)."""
     r = sess.post(f"{API}/allocations", json={
         "name": "TEST_SmallSync", "period": "2026-01",
         "bank_csv": FUZZY_BANK, "invoice_csv": FUZZY_INV, "mapping": FUZZY_MAPPING,
@@ -200,5 +223,6 @@ def test_small_run_is_synchronous(sess):
     assert r.status_code == 200
     d = r.json()
     assert d.get("status") == "done", f"expected sync done, got {d.get('status')}"
-    assert len(d.get("bank_rows", [])) == 4
+    bank_rows, _ = _fetch_all_rows(sess, d["id"])
+    assert len(bank_rows) == 4
     sess.delete(f"{API}/allocations/{d['id']}")

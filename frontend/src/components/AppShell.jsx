@@ -2,8 +2,8 @@ import React from "react";
 import { Link, NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import {
-  LayoutDashboard, FileSpreadsheet, GitCompareArrows, Users, ScrollText,
-  LogOut, PlusCircle, Building2, Sparkles, Tag,
+  LayoutDashboard, GitCompareArrows, Users, ScrollText,
+  LogOut, PlusCircle, Building2,
 } from "lucide-react";
 
 const navItems = [
@@ -52,23 +52,10 @@ export default function AppShell({ children }) {
         </nav>
 
         <div className="px-4 py-4 border-t border-slate-800">
-          <div className="flex items-center justify-between gap-2">
-            <div className="min-w-0">
-              <div className="text-xs text-slate-400 uppercase tracking-wider">Signed in</div>
-              <div className="text-sm font-medium mt-1 truncate" data-testid="user-name">{user?.name || user?.email}</div>
-              <div className="text-xs text-slate-500 truncate">{user?.email}</div>
-            </div>
-            {user?.tier === "pro" ? (
-              <Link to="/pricing" data-testid="plan-badge-pro"
-                className="inline-flex items-center gap-1 bg-gradient-to-br from-emerald-500 to-blue-600 text-white text-[10px] font-semibold uppercase tracking-wider px-2 py-1 rounded-full shrink-0">
-                <Sparkles className="h-3 w-3" /> Pro
-              </Link>
-            ) : (
-              <Link to="/pricing" data-testid="plan-badge-starter"
-                className="inline-flex items-center gap-1 bg-slate-700 hover:bg-slate-600 text-slate-200 text-[10px] font-semibold uppercase tracking-wider px-2 py-1 rounded-full shrink-0 transition-colors">
-                <Tag className="h-3 w-3" /> Free
-              </Link>
-            )}
+          <div className="min-w-0">
+            <div className="text-xs text-slate-400 uppercase tracking-wider">Signed in</div>
+            <div className="text-sm font-medium mt-1 truncate" data-testid="user-name">{user?.name || user?.email}</div>
+            <div className="text-xs text-slate-500 truncate">{user?.email}</div>
           </div>
           <button
             onClick={async () => { await logout(); navigate("/"); }}

@@ -1,5 +1,4 @@
 import axios from "axios";
-import { toast } from "sonner";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 export const API_BASE = `${BACKEND_URL}/api`;
@@ -45,14 +44,6 @@ api.interceptors.response.use(
       if (typeof window !== "undefined") {
         window.dispatchEvent(new CustomEvent("ebrr:logout"));
       }
-    }
-    if (status === 402) {
-      const d = error?.response?.data?.detail;
-      const message = (typeof d === "object" && d?.message) ? d.message : "Quota exceeded";
-      toast.error(message, {
-        duration: 8000,
-        action: { label: "Upgrade to Pro", onClick: () => { window.location.href = "/pricing"; } },
-      });
     }
     return Promise.reject(error);
   }

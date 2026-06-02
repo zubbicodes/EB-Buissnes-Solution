@@ -13,18 +13,15 @@ import logging
 import bcrypt
 import jwt
 from datetime import datetime, timezone, timedelta
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any
 
-from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, status, BackgroundTasks
+from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr
 from rapidfuzz import fuzz, process as rf_process, utils as rf_utils
 from collections import defaultdict
-from emergentintegrations.payments.stripe.checkout import (
-    StripeCheckout, CheckoutSessionRequest,
-)
 
 
 # ----- DB / Config -----
@@ -37,50 +34,6 @@ JWT_SECRET = os.environ['JWT_SECRET']
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
-STRIPE_API_KEY = os.environ.get("STRIPE_API_KEY", "sk_test_emergent")
-
-# Pricing — keep amounts on the BACKEND only, never trust the frontend
-PRICING = {
-    "pro_monthly": {"label": "Pro (monthly)", "amount": 49.00, "currency": "gbp", "grant_days": 30},
-}
-
-STARTER_MONTHLY_ROW_LIMIT = 5000
-
-
-def effective_tier(user: Dict[str, Any]) -> str:
-    until = user.get("pro_until")
-    if not until:
-        return "starter"
-    try:
-        return "pro" if datetime.fromisoformat(until.replace("Z", "+00:00")) > datetime.now(timezone.utc) else "starter"
-    except (ValueError, AttributeError):
-        return "starter"
-
-
-def usage_month_key() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m")
-
-
-async def check_row_quota(user_id: str, new_rows: int) -> Tuple[bool, int]:
-    """Return (allowed, current_usage_this_month)."""
-    user = await db.users.find_one({"id": user_id})
-    tier = effective_tier(user) if user else "starter"
-    month = usage_month_key()
-    counter_doc = await db.row_usage.find_one({"user_id": user_id, "month": month})
-    current = counter_doc["count"] if counter_doc else 0
-    if tier == "pro":
-        return True, current
-    return (current + new_rows) <= STARTER_MONTHLY_ROW_LIMIT, current
-
-
-async def record_row_usage(user_id: str, rows: int):
-    month = usage_month_key()
-    await db.row_usage.update_one(
-        {"user_id": user_id, "month": month},
-        {"$inc": {"count": rows}, "$setOnInsert": {"user_id": user_id, "month": month}},
-        upsert=True,
-    )
 
 
 # ----- Auth utils -----
@@ -776,171 +729,7 @@ async def refresh_session(request: Request, response: Response):
 
 @api.get("/auth/me")
 async def me(current=Depends(get_current_user)):
-    # Decorate the user object with current tier + usage so the UI can show the plan badge
-    tier = effective_tier(current)
-    counter = await db.row_usage.find_one({"user_id": current["id"], "month": usage_month_key()})
-    return {
-        **current,
-        "tier": tier,
-        "pro_until": current.get("pro_until"),
-        "row_usage_this_month": counter["count"] if counter else 0,
-        "row_limit_starter": STARTER_MONTHLY_ROW_LIMIT,
-    }
-
-
-# ----- Plan / Billing -----
-@api.get("/billing/plan")
-async def get_plan(current=Depends(get_current_user)):
-    tier = effective_tier(current)
-    counter = await db.row_usage.find_one({"user_id": current["id"], "month": usage_month_key()})
-    return {
-        "tier": tier,
-        "pro_until": current.get("pro_until"),
-        "row_usage_this_month": counter["count"] if counter else 0,
-        "row_limit_starter": STARTER_MONTHLY_ROW_LIMIT,
-        "pricing": PRICING,
-    }
-
-
-class CheckoutInit(BaseModel):
-    package_id: str
-    origin_url: str
-
-
-@api.post("/billing/checkout")
-async def billing_checkout(payload: CheckoutInit, request: Request, current=Depends(get_current_user)):
-    if payload.package_id not in PRICING:
-        raise HTTPException(status_code=400, detail="Unknown package")
-    pkg = PRICING[payload.package_id]
-    host = str(request.base_url).rstrip("/")
-    webhook_url = f"{host}/api/webhook/stripe"
-    stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
-    origin = payload.origin_url.rstrip("/")
-    success_url = f"{origin}/billing/success?session_id={{CHECKOUT_SESSION_ID}}"
-    cancel_url = f"{origin}/billing/cancel"
-    metadata = {
-        "user_id": current["id"],
-        "email": current["email"],
-        "package_id": payload.package_id,
-        "grant_days": str(pkg["grant_days"]),
-    }
-    req = CheckoutSessionRequest(
-        amount=float(pkg["amount"]),
-        currency=pkg["currency"],
-        success_url=success_url,
-        cancel_url=cancel_url,
-        metadata=metadata,
-    )
-    session = await stripe.create_checkout_session(req)
-
-    await db.payment_transactions.insert_one({
-        "id": str(uuid.uuid4()),
-        "session_id": session.session_id,
-        "user_id": current["id"],
-        "email": current["email"],
-        "amount": pkg["amount"],
-        "currency": pkg["currency"],
-        "package_id": payload.package_id,
-        "payment_status": "initiated",
-        "status": "pending",
-        "metadata": metadata,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    })
-    return {"url": session.url, "session_id": session.session_id}
-
-
-async def _apply_paid_subscription(user_id: str, package_id: str):
-    """Grant Pro by extending pro_until. Idempotent — only extends if there's no current Pro period yet."""
-    pkg = PRICING.get(package_id)
-    if not pkg:
-        return
-    user = await db.users.find_one({"id": user_id})
-    if not user:
-        return
-    now = datetime.now(timezone.utc)
-    base = now
-    cur = user.get("pro_until")
-    if cur:
-        try:
-            cur_dt = datetime.fromisoformat(cur.replace("Z", "+00:00"))
-            if cur_dt > now:
-                base = cur_dt  # stack the period
-        except (ValueError, AttributeError):
-            pass
-    new_until = base + timedelta(days=int(pkg["grant_days"]))
-    await db.users.update_one(
-        {"id": user_id},
-        {"$set": {"pro_until": new_until.isoformat(), "tier": "pro"}},
-    )
-
-
-@api.get("/billing/status/{session_id}")
-async def billing_status(session_id: str, request: Request, current=Depends(get_current_user)):
-    tx = await db.payment_transactions.find_one({"session_id": session_id, "user_id": current["id"]}, {"_id": 0})
-    if not tx:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    # If we've already processed it, return the cached status
-    if tx["payment_status"] == "paid":
-        return tx
-
-    host = str(request.base_url).rstrip("/")
-    webhook_url = f"{host}/api/webhook/stripe"
-    stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
-
-    # Stripe sometimes returns "No such checkout.session" while the session is still propagating —
-    # treat any retrieve failure as a transient "still pending" rather than 500.
-    try:
-        cs = await stripe.get_checkout_status(session_id)
-    except Exception as e:
-        logger.warning("Stripe status retrieval transient failure for %s: %s", session_id, e)
-        return {**tx, "transient_error": str(e)[:120]}
-
-    new_status = "complete" if cs.status == "complete" else cs.status
-    new_payment_status = cs.payment_status
-    update = {"status": new_status, "payment_status": new_payment_status,
-              "updated_at": datetime.now(timezone.utc).isoformat()}
-    await db.payment_transactions.update_one(
-        {"session_id": session_id, "user_id": current["id"]},
-        {"$set": update},
-    )
-    # Grant Pro ONLY on first paid transition
-    if new_payment_status == "paid" and tx["payment_status"] != "paid":
-        await _apply_paid_subscription(current["id"], tx.get("package_id"))
-        await write_audit(current["id"], None, "subscription_paid", {
-            "session_id": session_id, "amount": tx.get("amount"), "currency": tx.get("currency"),
-        })
-    out = await db.payment_transactions.find_one({"session_id": session_id, "user_id": current["id"]}, {"_id": 0})
-    return out
-
-
-@api.post("/webhook/stripe")
-async def stripe_webhook(request: Request):
-    """Stripe → us. We verify and update the transaction + grant Pro if paid."""
-    body = await request.body()
-    signature = request.headers.get("Stripe-Signature", "")
-    host = str(request.base_url).rstrip("/")
-    webhook_url = f"{host}/api/webhook/stripe"
-    stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
-    try:
-        event = await stripe.handle_webhook(body, signature)
-    except Exception as e:
-        logger.warning("Stripe webhook verify failed: %s", e)
-        raise HTTPException(status_code=400, detail="Invalid signature")
-    if not event:
-        return {"ok": True}
-    tx = await db.payment_transactions.find_one({"session_id": event.session_id})
-    if tx and event.payment_status == "paid" and tx.get("payment_status") != "paid":
-        await db.payment_transactions.update_one(
-            {"session_id": event.session_id},
-            {"$set": {"payment_status": "paid", "status": "complete",
-                      "updated_at": datetime.now(timezone.utc).isoformat()}},
-        )
-        await _apply_paid_subscription(tx["user_id"], tx.get("package_id"))
-        await write_audit(tx["user_id"], None, "subscription_paid_webhook", {
-            "session_id": event.session_id,
-        })
-    return {"ok": True}
+    return current
 
 
 # ----- CSV column-mapping presets (built-in) and saved profiles (per-user) -----
@@ -1000,9 +789,6 @@ class SaveMappingIn(BaseModel):
 
 @api.post("/mapping/presets")
 async def save_preset(payload: SaveMappingIn, current=Depends(get_current_user)):
-    # Pro-only feature gate
-    if effective_tier(current) != "pro":
-        raise HTTPException(status_code=402, detail="Saving mapping profiles is a Pro feature. Upgrade at /pricing.")
     doc = {
         "id": str(uuid.uuid4()),
         "user_id": current["id"],
@@ -1013,6 +799,7 @@ async def save_preset(payload: SaveMappingIn, current=Depends(get_current_user))
     }
     await db.user_mapping_profiles.insert_one(doc)
     doc.pop("user_id", None)
+    doc.pop("_id", None)
     return doc
 
 
@@ -1142,22 +929,6 @@ async def create_allocation(payload: AllocationCreate, background: BackgroundTas
 
     bank_row_count = validation.get("bank_row_count", 0)
     invoice_row_count = validation.get("invoice_row_count", 0)
-    total_rows = bank_row_count + invoice_row_count
-
-    # Tier-based quota: Starter is capped at 5,000 rows per calendar month.
-    allowed, current_usage = await check_row_quota(current["id"], total_rows)
-    if not allowed:
-        raise HTTPException(
-            status_code=402,
-            detail={
-                "code": "QUOTA_EXCEEDED",
-                "message": f"Starter plan limit reached: {current_usage}/{STARTER_MONTHLY_ROW_LIMIT} rows used this month. This run would add {total_rows} more rows. Upgrade to Pro for unlimited rows.",
-                "tier": "starter",
-                "used": current_usage,
-                "limit": STARTER_MONTHLY_ROW_LIMIT,
-                "would_add": total_rows,
-            },
-        )
 
     # Anything > 2000 on either side runs in the background to keep HTTP fast
     is_large = bank_row_count > 2000 or invoice_row_count > 2000
@@ -1179,7 +950,6 @@ async def create_allocation(payload: AllocationCreate, background: BackgroundTas
             "fully_matched": 0, "partially_matched": 0, "unmatched_bank": 0,
             "unmatched_invoices": 0, "total_allocated": 0.0, "total_outstanding": 0.0,
         }})
-        await record_row_usage(current["id"], total_rows)
         background.add_task(_process_run_async, run_id, current["id"], payload.bank_csv, payload.invoice_csv, payload.mapping.model_dump())
         doc = await db.allocation_runs.find_one({"id": run_id, "user_id": current["id"]}, {"_id": 0})
         return doc
@@ -1192,7 +962,6 @@ async def create_allocation(payload: AllocationCreate, background: BackgroundTas
     doc = {**base_doc, "stats": stats}
     await db.allocation_runs.insert_one(doc)
     await save_run_rows(run_id, current["id"], bank_rows, invoice_rows)
-    await record_row_usage(current["id"], total_rows)
     await write_audit(current["id"], run_id, "create_run", {
         "name": payload.name, "period": payload.period, "stats": stats,
     })
@@ -1324,74 +1093,94 @@ async def export_allocation(run_id: str, current=Depends(get_current_user)):
 
 @api.get("/allocations/{run_id}/export-xlsx")
 async def export_allocation_xlsx(run_id: str, current=Depends(get_current_user)):
+    """Stream a large Excel export without OOMing.
+
+    Uses openpyxl's write-only mode (~10x lower memory, ~5x faster) so 29k+ rows
+    don't blow the worker. Per-row colour fills are skipped — only the header is
+    styled — because per-cell PatternFill allocations are the dominant cost on
+    large workbooks. The final BytesIO is yielded in 64 KB chunks so the client
+    receives bytes incrementally instead of buffering the whole file.
+    """
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.cell import WriteOnlyCell
     run = await db.allocation_runs.find_one({"id": run_id, "user_id": current["id"]}, {"_id": 0})
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
 
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Allocations"
+    wb = Workbook(write_only=True)
     hdr_font = Font(bold=True, color="FFFFFF")
     hdr_fill = PatternFill("solid", fgColor="0F172A")
-    status_fills = {
-        "full": PatternFill("solid", fgColor="DCFCE7"),
-        "partial": PatternFill("solid", fgColor="FEF3C7"),
-        "unmatched": PatternFill("solid", fgColor="FEE2E2"),
-    }
-    headers = ["Bank Date", "Bank Reference", "Bank Payer", "Bank Amount", "Status",
-               "Confidence", "Why matched?", "Matched Invoices", "Allocated", "Bank Remaining"]
-    for col, h in enumerate(headers, start=1):
-        c = ws.cell(row=1, column=col, value=h)
+    hdr_align = Alignment(horizontal="left")
+
+    def _hdr(ws_ref, value):
+        c = WriteOnlyCell(ws_ref, value=value)
         c.font = hdr_font
         c.fill = hdr_fill
-        c.alignment = Alignment(horizontal="left")
+        c.alignment = hdr_align
+        return c
 
-    r_idx = 2
-    async for b in db.allocation_bank_rows.find({"run_id": run_id, "user_id": current["id"]}, {"_id": 0}).sort("idx", 1):
+    ws = wb.create_sheet("Allocations")
+    ws.append([_hdr(ws, h) for h in [
+        "Bank Date", "Bank Reference", "Bank Payer", "Bank Amount", "Status",
+        "Confidence", "Why matched?", "Matched Invoices", "Allocated", "Bank Remaining",
+    ]])
+
+    async for b in db.allocation_bank_rows.find(
+        {"run_id": run_id, "user_id": current["id"]}, {"_id": 0}
+    ).sort("idx", 1):
         nums = ", ".join((m.get("invoice_number") or "?") for m in b.get("matches", []))
         allocated = round(sum(m["amount"] for m in b.get("matches", [])), 2)
-        vals = [b.get("date") or "", b.get("reference") or "", b.get("payer") or "",
-                b["amount"], b["status"], b.get("confidence") or "", b.get("reason") or "",
-                nums, allocated, b["remaining"]]
-        for c_idx, v in enumerate(vals, start=1):
-            cell = ws.cell(row=r_idx, column=c_idx, value=v)
-            if c_idx in (4, 9, 10):
-                cell.number_format = '£#,##0.00'
-            if status_fills.get(b["status"]):
-                cell.fill = status_fills[b["status"]]
-        r_idx += 1
-    for i, w in enumerate([12, 28, 24, 14, 12, 12, 36, 28, 14, 14], start=1):
-        ws.column_dimensions[chr(64 + i)].width = w
+        ws.append([
+            b.get("date") or "",
+            b.get("reference") or "",
+            b.get("payer") or "",
+            b["amount"],
+            b["status"],
+            b.get("confidence") or "",
+            b.get("reason") or "",
+            nums,
+            allocated,
+            b["remaining"],
+        ])
 
     ws2 = wb.create_sheet("Invoices")
-    inv_headers = ["Invoice #", "Debtor", "Date", "Amount", "Outstanding", "Status"]
-    for col, h in enumerate(inv_headers, start=1):
-        c = ws2.cell(row=1, column=col, value=h)
-        c.font = hdr_font
-        c.fill = hdr_fill
-    r_idx = 2
-    async for inv in db.allocation_invoice_rows.find({"run_id": run_id, "user_id": current["id"]}, {"_id": 0}).sort("idx", 1):
-        vals = [inv["number"], inv.get("debtor") or "", inv.get("date") or "",
-                inv["amount"], inv["remaining"], inv["status"]]
-        for c_idx, v in enumerate(vals, start=1):
-            cell = ws2.cell(row=r_idx, column=c_idx, value=v)
-            if c_idx in (4, 5):
-                cell.number_format = '£#,##0.00'
-            if status_fills.get(inv["status"]):
-                cell.fill = status_fills[inv["status"]]
-        r_idx += 1
-    for i, w in enumerate([14, 28, 12, 14, 14, 12], start=1):
-        ws2.column_dimensions[chr(64 + i)].width = w
+    ws2.append([_hdr(ws2, h) for h in [
+        "Invoice #", "Debtor", "Date", "Amount", "Outstanding", "Status",
+    ]])
+    async for inv in db.allocation_invoice_rows.find(
+        {"run_id": run_id, "user_id": current["id"]}, {"_id": 0}
+    ).sort("idx", 1):
+        ws2.append([
+            inv["number"],
+            inv.get("debtor") or "",
+            inv.get("date") or "",
+            inv["amount"],
+            inv["remaining"],
+            inv["status"],
+        ])
 
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
+    size = buf.getbuffer().nbytes
+
+    def chunked():
+        CHUNK_BYTES = 64 * 1024
+        while True:
+            data = buf.read(CHUNK_BYTES)
+            if not data:
+                break
+            yield data
+
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]", "_", run["name"])[:80]
     return StreamingResponse(
-        buf,
+        chunked(),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="allocation-{run["name"]}.xlsx"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="allocation-{safe_name}.xlsx"',
+            "Content-Length": str(size),
+        },
     )
 
 

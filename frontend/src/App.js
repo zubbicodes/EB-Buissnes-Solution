@@ -12,8 +12,6 @@ import AllocationDetail from "@/pages/AllocationDetail";
 import Compare from "@/pages/Compare";
 import Debtors from "@/pages/Debtors";
 import Audit from "@/pages/Audit";
-import Pricing from "@/pages/Pricing";
-import BillingResult from "@/pages/BillingResult";
 
 function Protected() {
   const { user } = useAuth();
@@ -47,7 +45,6 @@ export default function App() {
           <Route path="/" element={<PublicOnly><Landing /></PublicOnly>} />
           <Route path="/signin" element={<PublicOnly><SignIn /></PublicOnly>} />
           <Route path="/signup" element={<PublicOnly><SignUp /></PublicOnly>} />
-          <Route path="/pricing" element={<Pricing />} />
           <Route element={<Protected />}>
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/new" element={<NewAllocation />} />
@@ -56,8 +53,6 @@ export default function App() {
             <Route path="/compare" element={<Compare />} />
             <Route path="/debtors" element={<Debtors />} />
             <Route path="/audit" element={<Audit />} />
-            <Route path="/billing/success" element={<BillingResult kind="success" />} />
-            <Route path="/billing/cancel" element={<BillingResult kind="cancel" />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

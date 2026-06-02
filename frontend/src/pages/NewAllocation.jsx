@@ -518,14 +518,7 @@ function PresetPicker({ mapping, setMapping, bankHeaders, invHeaders }) {
       setProfileLabel("");
       await load();
     } catch (e) {
-      const msg = formatError(e);
-      if (msg.toLowerCase().includes("pro feature")) {
-        toast.error("Saving mapping profiles is a Pro feature.", {
-          action: { label: "Upgrade", onClick: () => { window.location.href = "/pricing"; } },
-        });
-      } else {
-        toast.error(msg);
-      }
+      toast.error(formatError(e));
     }
     setSaving(false);
   };
@@ -549,7 +542,6 @@ function PresetPicker({ mapping, setMapping, bankHeaders, invHeaders }) {
 
       {showSave && (
         <div className="bg-slate-50 border border-slate-200 rounded-md p-4 mb-4" data-testid="save-profile-panel">
-          <div className="text-xs text-slate-500 mb-2">Saved profiles are Pro-only. Free preview is available below.</div>
           <div className="flex flex-wrap items-end gap-3">
             <div className="flex-1 min-w-[200px]">
               <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Profile name</div>

@@ -1,0 +1,60 @@
+{
+  "summary": "Frontend verification after the payment/Stripe removal + Excel-export-OOM fix. All 6 acceptance items in the review request were exercised against the live preview backend. 5/6 PASSED on first run; the 6th (saved mapping profile flow) initially FAILED due to an unrelated MongoDB ObjectId serialization bug in POST /api/mapping/presets — I applied a one-line fix (excluding `_id` from the response) and re-verified, after which it PASSES. The Stripe surgery itself is clean: no plan badge, no /pricing or /billing routes, no Pro feature gating, no 402 interceptor visible from the UI.",
+  "verified_features": {
+    "login_admin": "PASS - admin@ebbusiness.com / Admin@2026! lands on /dashboard",
+    "no_plan_badge_in_sidebar": "PASS - querySelector('[data-testid=plan-badge-pro]') = null, '[data-testid=plan-badge-starter]' = null, '[data-testid^=plan-badge]' = null. Sidebar shows only Dashboard / New Allocation / Compare / Debtor Report / Audit Trail.",
+    "pricing_route_dead": "PASS - Navigating to /pricing redirects to /dashboard (catch-all). No pricing UI rendered.",
+    "billing_success_route_dead": "PASS - Navigating to /billing/success?session_id=foo redirects to /dashboard. No BillingResult page rendered.",
+    "save_mapping_profile_non_pro": "PASS (after fix) - From /new wizard, step 3, clicking [data-testid=save-profile-btn] -> filling [data-testid=save-profile-label] -> clicking [data-testid=save-profile-submit] returns HTTP 200 and shows 'Mapping profile saved' toast. NO 'Pro feature' / 'Upgrade to Pro' toast. 'Saved profiles are Pro-only' helper text is absent from DOM.",
+    "excel_export_initiates": "PASS - On /allocations/4e311df5-... (XL_export_ea2520, 6000 rows), [data-testid=export-xlsx] href = '.../api/allocations/{id}/export-xlsx'. Authenticated fetch returns status=200, content-type=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, content-length=468083 bytes, end-to-end in ~1.66s. content-disposition correctly sets the .xlsx filename.",
+    "review_layer_still_works": "PASS - On the same allocation, 50 [data-testid^=review-bank-] buttons rendered in Confirmed tab; clicking one opens [data-testid=review-panel]. Clicking [data-testid^=row-...] also opens the panel. [data-testid=review-close] closes it. Match table cells [data-testid$=-outstanding] render the £before -> £after pair with an ArrowRight SVG; modal Matched-Invoice card shows 'Outstanding £101.00 -> £0.00' (arrow icon present).",
+    "deprecated_endpoints_return_404": "PASS (curl-verified) - GET /api/billing/plan = 404, POST /api/billing/checkout = 404, /api/auth/me payload contains no 'tier' or 'pro_until' keys.",
+    "frontend_dead_imports": "PASS - No pageerror events. No console errors apart from the 500 from the buggy /mapping/presets prior to fix. grep -i 'plan|pricing|billing|stripe|tier|pro_until|402' on App.js, AppShell.jsx, lib/api.js, NewAllocation.jsx returns ZERO matches."
+  },
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "POST /api/mapping/presets",
+        "issue": "FIXED IN THIS ITERATION. Was returning 500 with TypeError: 'ObjectId' object is not iterable. Root cause: insert_one mutates the local doc dict to add _id (ObjectId), then the handler returned that dict directly to FastAPI's jsonable_encoder which cannot serialize ObjectId. Fix applied at /app/backend/server.py:802 — added `doc.pop('_id', None)` before return. Verified via curl (200) and via the wizard UI ('Mapping profile saved' toast). This was a regression introduced by the payment-block surgery (the Pro gate that previously short-circuited the request masked the latent bug)."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "AllocationDetail",
+        "issues": ["(Carried from iteration_14) The Confirmed table has min-width:1400px; at 1920px with the sidebar open the right-most Review column may be partially clipped and requires horizontal scroll. Functional but cosmetic."]
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/test_reports/iteration_15.json"
+  ],
+  "action_items": [
+    "Main agent: please consider replicating the `doc.pop('_id', None)` pattern review on any other POST handlers in server.py that return the freshly-inserted Mongo dict (search for `insert_one(doc)` followed by `return doc`) — same latent bug shape may exist elsewhere.",
+    "(Optional) Same-iteration regression test for POST /api/mapping/presets is already covered by the existing pytest suite per the agent-to-agent context note — main agent does not need to add one."
+  ],
+  "critical_code_review_comments": [
+    "Latent Mongo-serialization bug in POST /api/mapping/presets revealed by the Pro-gate removal. Root cause: pymongo's insert_one() mutates the input dict to set _id; returning that dict to FastAPI causes a serialization 500. Fix is minimal (pop _id before return) and consistent with the codebase convention used elsewhere (e.g., list_presets uses projection {_id: 0}).",
+    "Stripe-surgery is clean: no orphan imports, no dead Pricing/BillingResult components in /app/frontend/src/pages, no plan badge references in AppShell.jsx, no 402 interceptor in lib/api.js, no 'Pro-only' / 'Pro feature' helper text or toasts in NewAllocation.jsx. Verified via grep across all four files of reference.",
+    "Excel write-only refactor verified end-to-end: 6,000-row run exports in 1.66s producing a valid 468KB .xlsx with the correct content-type and Content-Disposition headers. The chunked BytesIO streaming and absence of per-row PatternFill are reflected in the throughput.",
+    "Backend assertion: GET /api/billing/plan and POST /api/billing/checkout both return 404 with no route registered, confirming the FastAPI router no longer mounts /billing/*. GET /api/auth/me payload now contains only {id, email, name, created_at} — no 'tier' or 'pro_until'."
+  ],
+  "updated_files": [
+    "/app/backend/server.py — line ~802: added `doc.pop('_id', None)` in POST /api/mapping/presets to fix ObjectId-not-serializable 500."
+  ],
+  "success_rate": {
+    "backend": "100% (post-fix; was 1 endpoint failing pre-fix out of the 4 I curl-verified)",
+    "frontend": "100% (6/6 acceptance items PASS after the one-line backend fix)"
+  },
+  "test_credentials": "admin@ebbusiness.com / Admin@2026! (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Not needed — existing run id 4e311df5-b27a-494c-ac4d-8ab6c1736fa2 (XL_export_ea2520, 6000 rows) covered the Excel-export-at-scale test and provided 50 Confirmed rows for the review-layer smoke. Two mapping profiles were created during testing (label 'TEST_curl_p1' via curl and 'TEST_ui_profile_x9' via UI) — both safe to leave or clean up.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Iteration 15 verified the Stripe rip-out and the openpyxl write-only Excel export rewrite. One latent backend bug surfaced (POST /api/mapping/presets returning ObjectId-not-serializable 500) and was fixed in /app/backend/server.py by popping _id before returning the inserted doc. The fix has no business-logic impact and is consistent with the existing convention. Stable test handles to reuse: run id 4e311df5-b27a-494c-ac4d-8ab6c1736fa2 (XL_export_ea2520) for the 6000-row export path; admin user id 031ff230-400d-4f8a-a7d8-2c573e603136. Frontend testids exercised this iteration: plan-badge-pro / plan-badge-starter (must be absent), save-profile-btn / save-profile-label / save-profile-submit / save-profile-panel, export-xlsx, export-csv, review-bank-<id>, review-panel, review-close, row-<bankId>-<idx>, match-<bankId>-<idx>-outstanding.",
+  "rca_of_the_issue": "POST /api/mapping/presets returned 500 with 'TypeError: ObjectId object is not iterable'. Reproduction: log in as admin, open /new wizard, load sample CSVs through step 3, click '+ Save as profile' -> name it -> 'Save profile'. Frontend toast 'Request failed with status code 500'. Backend traceback shows fastapi.encoders.jsonable_encoder failing on an ObjectId — pymongo's insert_one() mutates the passed-in dict to add the generated _id, and the handler returned that mutated dict. Mitigation: added `doc.pop('_id', None)` after the insert_one call (line 802) — analogous to how list_presets uses projection {_id:0}. Verified by re-running curl POST (200 OK) and the wizard UI flow (success toast). This bug was latent — it was previously hidden behind a Pro-tier 402 gate that returned before reaching insert_one. Removing the payment block in this iteration unmasked it."
+}
