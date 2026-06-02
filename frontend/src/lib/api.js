@@ -1,4 +1,5 @@
 import axios from "axios";
+import { saveAs } from "file-saver";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 export const API_BASE = `${BACKEND_URL}/api`;
@@ -69,8 +70,11 @@ export const fmtGBP = (n) =>
  * lives in localStorage and is attached by the axios interceptor; a plain
  * anchor click bypasses axios and the browser only sends cookies (which are
  * unreliable under strict tracking-prevention / Safari ITP / Brave Shields).
- * So we fetch the file ourselves with the proper auth header, then trigger a
- * download via a blob URL. Works on any modern browser.
+ *
+ * We fetch the file ourselves with the proper auth header, then defer the
+ * actual "save to disk" to file-saver's `saveAs()`, which has accumulated
+ * years of cross-browser fixes (Chrome download throttling, Safari quirks,
+ * etc.) — vastly more reliable than a hand-rolled <a>.click() loop.
  *
  * @param {string} path  Path under /api (e.g. "/allocations/abc/export")
  * @param {string} filename  Suggested filename for the saved file
@@ -97,14 +101,5 @@ export async function downloadAuthed(path, filename) {
     throw new Error(`Download failed (${res.status}): ${typeof detail === "string" ? detail : JSON.stringify(detail)}`);
   }
   const blob = await res.blob();
-  const blobUrl = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = blobUrl;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  setTimeout(() => {
-    URL.revokeObjectURL(blobUrl);
-    a.remove();
-  }, 200);
+  saveAs(blob, filename);
 }
