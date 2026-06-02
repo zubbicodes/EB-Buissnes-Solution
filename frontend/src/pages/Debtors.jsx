@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { api, API_BASE, fmtGBP, formatError } from "@/lib/api";
+import { api, fmtGBP, formatError, downloadAuthed } from "@/lib/api";
 import { toast } from "sonner";
 import { ChevronDown, ChevronRight, Download, Flag } from "lucide-react";
 
@@ -7,6 +7,7 @@ export default function Debtors() {
   const [threshold, setThreshold] = useState("1000");
   const [data, setData] = useState(null);
   const [open, setOpen] = useState({});
+  const [exporting, setExporting] = useState(false);
 
   const load = async () => {
     try {
@@ -15,6 +16,19 @@ export default function Debtors() {
     } catch (e) { toast.error(formatError(e)); }
   };
   useEffect(() => { load(); }, []); // eslint-disable-line
+
+  const onExport = async () => {
+    if (exporting) return;
+    setExporting(true);
+    try {
+      await downloadAuthed(`/debtors/export?threshold=${Number(threshold) || 0}`, "debtor-report.csv");
+      toast.success("CSV ready");
+    } catch (e) {
+      toast.error(e?.message || "Export failed");
+    } finally {
+      setExporting(false);
+    }
+  };
 
   return (
     <div data-testid="debtors-page">
@@ -35,10 +49,10 @@ export default function Debtors() {
           className="bg-[#0F172A] text-white font-semibold px-4 py-2 rounded-md text-sm hover:bg-slate-800">
           Apply
         </button>
-        <a href={`${API_BASE}/debtors/export?threshold=${Number(threshold) || 0}`} download data-testid="export-debtors"
-          className="ml-auto inline-flex items-center gap-2 text-sm font-semibold text-emerald-700 hover:text-emerald-900">
-          <Download className="h-4 w-4" /> Export CSV
-        </a>
+        <button onClick={onExport} disabled={exporting} data-testid="export-debtors"
+          className="ml-auto inline-flex items-center gap-2 text-sm font-semibold text-emerald-700 hover:text-emerald-900 disabled:opacity-50 disabled:cursor-not-allowed">
+          <Download className="h-4 w-4" /> {exporting ? "Preparing…" : "Export CSV"}
+        </button>
       </div>
 
       {data && (

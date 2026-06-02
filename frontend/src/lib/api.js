@@ -60,3 +60,41 @@ export function formatError(err) {
 
 export const fmtGBP = (n) =>
   new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" }).format(Number(n || 0));
+
+
+/**
+ * Programmatic authenticated file download.
+ *
+ * Why we can't just use <a href={url} download>: the Authorization Bearer token
+ * lives in localStorage and is attached by the axios interceptor; a plain
+ * anchor click bypasses axios and the browser only sends cookies (which are
+ * unreliable under strict tracking-prevention / Safari ITP / Brave Shields).
+ * So we fetch the file ourselves with the proper auth header, then trigger a
+ * download via a blob URL. Works on any modern browser.
+ *
+ * @param {string} path  Path under /api (e.g. "/allocations/abc/export")
+ * @param {string} filename  Suggested filename for the saved file
+ */
+export async function downloadAuthed(path, filename) {
+  const url = `${API_BASE}${path}`;
+  const headers = {};
+  const t = getToken();
+  if (t) headers.Authorization = `Bearer ${t}`;
+  const res = await fetch(url, { method: "GET", credentials: "include", headers });
+  if (!res.ok) {
+    let detail = "";
+    try { detail = (await res.json())?.detail || ""; } catch { detail = await res.text(); }
+    throw new Error(`Download failed (${res.status}): ${typeof detail === "string" ? detail : JSON.stringify(detail)}`);
+  }
+  const blob = await res.blob();
+  const blobUrl = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = blobUrl;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    URL.revokeObjectURL(blobUrl);
+    a.remove();
+  }, 200);
+}

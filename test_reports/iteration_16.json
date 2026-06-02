@@ -1,0 +1,31 @@
+{
+  "summary": "Verified the export-button bug fix end-to-end via Playwright with download interception + network listener. All three export buttons (Export Excel, Export CSV on AllocationDetail, Export CSV on Debtors) now work correctly with Bearer auth via the new downloadAuthed helper. Files download to disk with valid content; backend returns 200; Authorization: Bearer <token> is sent on every export request. Negative test (token cleared) correctly surfaces an error toast instead of failing silently — the original user-reported bug ('the buttons do not work') is resolved.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {
+        "flow": "Export error message readability",
+        "issue": "In downloadAuthed (api.js), when a non-OK response body cannot be parsed as JSON, the code calls (await res.json()) inside try and (await res.text()) in catch. Because res.json() already consumed the response body, the fallback res.text() throws 'Failed to execute \\'text\\' on \\'Response\\': body stream already read', and that error message is shown to the user instead of the intended 'Download failed (401): Not authenticated'. The toast still appears (no silent failure), but the message is unhelpful. Recommended fix: clone the response first (const ct = res.headers.get('content-type') || ''; if (ct.includes('application/json')) detail = (await res.json())?.detail; else detail = await res.text();) or call res.clone() before the JSON parse attempt.",
+        "affected_selectors": ["[data-testid=export-debtors]", "[data-testid=export-xlsx]", "[data-testid=export-csv]"]
+      }
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [],
+  "action_items": [
+    "Optional polish: in downloadAuthed (/app/frontend/src/lib/api.js), avoid double-consuming response body so the auth-failure toast shows a readable message instead of 'body stream already read'."
+  ],
+  "critical_code_review_comments": [
+    "downloadAuthed: response body consumed twice on non-OK path → confusing toast message. Use content-type sniffing or res.clone() before await.json().",
+    "Otherwise the helper is well-formed: revokes blob URL, cleans up the <a>, passes Authorization header, keeps credentials:'include' for cookie fallback."
+  ],
+  "updated_files": [],
+  "success_rate": { "backend": "n/a (frontend-only test)", "frontend": "100% (8/8 verifications passed)" },
+  "test_credentials": "admin@ebbusiness.com / Admin@2026! (worked)",
+  "seed_data_creation": "Reused existing seeded allocation run XL_export_344182 (id c4ff2b7a-f66a-46ad-bd8a-510a62ca8aa7, status=done). 170 runs already present.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Playwright async download pattern used: `async with page.expect_download() as dl_info: await page.click(...); download = await dl_info.value; await download.save_as(path)`. Worked first-time. SignIn page selectors: data-testid=signin-email/signin-password/signin-submit (NOT login-*). Allocation list endpoint returns a plain JSON array, not {runs:[...]}. Verified network: GET /api/allocations/{id}/export-xlsx → 200, content-type application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, size 468083, PK header OK. GET /api/allocations/{id}/export → 200, text/csv, 854837 bytes, starts with 'Bank Date,Bank Reference,'. GET /api/debtors/export?threshold=1000 → 200, text/csv, 86495 bytes, starts with 'Debtor,Flagged,'. All three carried Authorization: Bearer header. After clearing both localStorage and cookies, the same request returned 401 and triggered an error toast (no silent failure).",
+  "rca_of_the_issue": "Original bug: <a href={apiUrl} download> bypasses axios, so no Authorization header was attached; backend returned 401 silently, browser did nothing → user saw 'button does nothing'. Fix in iteration 15 introduced downloadAuthed() which uses fetch() with Bearer header, blob() + URL.createObjectURL() + programmatic anchor click. Iteration 16 (this run) confirms the fix works in all three call sites and across normal + negative scenarios. The only residual issue is cosmetic: an unhelpful error message in the failure-toast path due to double-consuming the Response body."
+}

@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { useParams, Link } from "react-router-dom";
-import { api, API_BASE, fmtGBP, formatError } from "@/lib/api";
+import { api, fmtGBP, formatError, downloadAuthed } from "@/lib/api";
 import { toast } from "sonner";
 import { ArrowLeft, Download, Link2, AlertTriangle, FileSpreadsheet, ChevronLeft, ChevronRight, Search, Eye, ArrowRight } from "lucide-react";
 
@@ -84,8 +84,25 @@ export default function AllocationDetail() {
   // Reset page when changing tab/search
   useEffect(() => { setPage(1); }, [tab, search]);
 
-  const exportUrl = `${API_BASE}/allocations/${id}/export`;
-  const exportXlsxUrl = `${API_BASE}/allocations/${id}/export-xlsx`;
+  const [exporting, setExporting] = useState(null); // 'csv' | 'xlsx' | null
+
+  const handleExport = async (kind) => {
+    if (exporting) return;
+    setExporting(kind);
+    const safe = (run?.name || "allocation").replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 80);
+    try {
+      if (kind === "csv") {
+        await downloadAuthed(`/allocations/${id}/export`, `allocation-${safe}.csv`);
+      } else {
+        await downloadAuthed(`/allocations/${id}/export-xlsx`, `allocation-${safe}.xlsx`);
+      }
+      toast.success(kind === "csv" ? "CSV ready" : "Excel ready");
+    } catch (e) {
+      toast.error(e?.message || "Export failed");
+    } finally {
+      setExporting(null);
+    }
+  };
 
   if (!run) return <div className="text-slate-500" data-testid="loading">Loading…</div>;
 
@@ -142,14 +159,16 @@ export default function AllocationDetail() {
           <p className="text-slate-500 text-sm mt-1">Period {run.period} · Created {new Date(run.created_at).toLocaleString("en-GB")}</p>
         </div>
         <div className="flex items-center gap-2">
-          <a href={exportXlsxUrl} download data-testid="export-xlsx"
-            className="inline-flex items-center gap-2 bg-emerald-600 text-white font-semibold px-4 py-2.5 rounded-md hover:bg-emerald-700 transition-colors">
-            <FileSpreadsheet className="h-4 w-4" /> Export Excel
-          </a>
-          <a href={exportUrl} download data-testid="export-csv"
-            className="inline-flex items-center gap-2 bg-[#0F172A] text-white font-semibold px-4 py-2.5 rounded-md hover:bg-slate-800 transition-colors">
-            <Download className="h-4 w-4" /> Export CSV
-          </a>
+          <button onClick={() => handleExport("xlsx")} disabled={exporting !== null} data-testid="export-xlsx"
+            className="inline-flex items-center gap-2 bg-emerald-600 text-white font-semibold px-4 py-2.5 rounded-md hover:bg-emerald-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed">
+            <FileSpreadsheet className="h-4 w-4" />
+            {exporting === "xlsx" ? "Preparing…" : "Export Excel"}
+          </button>
+          <button onClick={() => handleExport("csv")} disabled={exporting !== null} data-testid="export-csv"
+            className="inline-flex items-center gap-2 bg-[#0F172A] text-white font-semibold px-4 py-2.5 rounded-md hover:bg-slate-800 transition-colors disabled:opacity-60 disabled:cursor-not-allowed">
+            <Download className="h-4 w-4" />
+            {exporting === "csv" ? "Preparing…" : "Export CSV"}
+          </button>
         </div>
       </div>
 
