@@ -66,24 +66,89 @@ export const fmtGBP = (n) =>
 /**
  * Programmatic authenticated file download.
  *
- * Why we can't just use <a href={url} download>: the Authorization Bearer token
- * lives in localStorage and is attached by the axios interceptor; a plain
- * anchor click bypasses axios and the browser only sends cookies (which are
- * unreliable under strict tracking-prevention / Safari ITP / Brave Shields).
+ * Why this is non-trivial:
+ *  - The Bearer token is in localStorage, so we can't use a plain <a href> link
+ *    (it would be sent with no Authorization header and 401).
+ *  - When the page is rendered inside a sandboxed iframe (e.g. the Emergent
+ *    preview shell), Chrome silently blocks programmatic downloads from blob:
+ *    URLs unless the parent set sandbox="... allow-downloads ...". The fetch
+ *    + saveAs() approach therefore works in a regular browser tab but not in
+ *    the embedded preview.
  *
- * We fetch the file ourselves with the proper auth header, then defer the
- * actual "save to disk" to file-saver's `saveAs()`, which has accumulated
- * years of cross-browser fixes (Chrome download throttling, Safari quirks,
- * etc.) — vastly more reliable than a hand-rolled <a>.click() loop.
+ * Strategy:
+ *  1. Open a same-origin popup IMMEDIATELY (while we still hold user
+ *     activation). This popup is a top-level browsing context, NOT subject
+ *     to the parent iframe's sandbox — downloads inside it just work.
+ *  2. The popup runs its own fetch with the Bearer token, creates a blob,
+ *     and triggers the download via an anchor click. Then closes itself.
+ *  3. If popup_blocked OR we're already top-level, fall back to in-page
+ *     file-saver, which is the right thing for normal browser tabs.
+ *
+ * Side benefit: works identically in iframes and top-level tabs.
  *
  * @param {string} path  Path under /api (e.g. "/allocations/abc/export")
  * @param {string} filename  Suggested filename for the saved file
  */
 export async function downloadAuthed(path, filename) {
   const url = `${API_BASE}${path}`;
+  const token = getToken() || "";
+  const inIframe = (() => { try { return window.self !== window.top; } catch { return true; } })();
+
+  // 1) In-iframe → route through a popup window (top-level browsing context).
+  if (inIframe) {
+    let popup = null;
+    try { popup = window.open("", "_blank"); } catch { popup = null; }
+    if (popup && !popup.closed) {
+      // Write a tiny page that does the auth'd fetch and triggers the
+      // download itself. JSON.stringify safely embeds the values (escapes
+      // </script>, quotes, etc.).
+      const html = `<!doctype html><html><head><title>Downloading…</title>
+<style>body{font-family:system-ui,sans-serif;padding:2rem;background:#f8fafc;color:#0f172a}
+.err{color:#b91c1c;background:#fee2e2;border:1px solid #fecaca;padding:.75rem 1rem;border-radius:.5rem;margin-top:1rem}
+.ok{color:#065f46}</style></head><body>
+<h3>Preparing ${filename.replace(/[<>&]/g, "")}…</h3>
+<p id="status">Fetching file…</p>
+<script>
+(async () => {
+  try {
+    const res = await fetch(${JSON.stringify(url)}, {
+      credentials: 'include',
+      headers: ${JSON.stringify(token ? { Authorization: `Bearer ${token}` } : {})},
+    });
+    if (!res.ok) {
+      const t = await res.text().catch(() => '');
+      document.getElementById('status').className = 'err';
+      document.getElementById('status').textContent = 'Download failed (HTTP ' + res.status + '): ' + t.slice(0, 300);
+      return;
+    }
+    const blob = await res.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = blobUrl;
+    a.download = ${JSON.stringify(filename)};
+    a.rel = 'noopener';
+    document.body.appendChild(a);
+    a.click();
+    document.getElementById('status').className = 'ok';
+    document.getElementById('status').textContent = 'Download started — saving as ' + ${JSON.stringify(filename)} + '. You can close this tab.';
+    setTimeout(() => { try { window.close(); } catch (e) {} }, 1500);
+  } catch (e) {
+    document.getElementById('status').className = 'err';
+    document.getElementById('status').textContent = 'Download error: ' + (e && e.message ? e.message : String(e));
+  }
+})();
+</script></body></html>`;
+      popup.document.open();
+      popup.document.write(html);
+      popup.document.close();
+      return;
+    }
+    // Popup was blocked → fall through to in-page path with a hint.
+  }
+
+  // 2) Top-level (or popup blocked) → fetch + file-saver in-page.
   const headers = {};
-  const t = getToken();
-  if (t) headers.Authorization = `Bearer ${t}`;
+  if (token) headers.Authorization = `Bearer ${token}`;
   const res = await fetch(url, { method: "GET", credentials: "include", headers });
   if (!res.ok) {
     let detail = "";
@@ -103,4 +168,7 @@ export async function downloadAuthed(path, filename) {
   }
   const blob = await res.blob();
   saveAs(blob, filename);
+  if (inIframe) {
+    throw new Error("Your browser blocked the popup. Please allow popups for this site and try again — exports use a popup tab to bypass the preview iframe.");
+  }
 }
