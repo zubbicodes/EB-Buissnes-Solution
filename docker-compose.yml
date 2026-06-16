@@ -9,6 +9,12 @@ services:
       - mongodb_data:/data/db
     environment:
       MONGO_INITDB_DATABASE: receivables
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   backend:
     build:
@@ -18,14 +24,13 @@ services:
     ports:
       - "8000"
     depends_on:
-      - mongodb
+      mongodb:
+        condition: service_healthy
     environment:
       - MONGO_URL=mongodb://mongodb:27017
       - DB_NAME=receivables
       - JWT_SECRET=your-secret-key-change-in-production  # Change this to a real secret in production
       - CORS_ORIGINS=*
-    volumes:
-      - ./backend:/app
 
   frontend:
     build:
@@ -36,9 +41,6 @@ services:
       - "3000"
     depends_on:
       - backend
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
 
 volumes:
   mongodb_data:
