@@ -1,15 +1,4 @@
-FROM python:3.12-slim
-
-# Install system dependencies needed for some Python packages
-RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
-    make \
-    libffi-dev \
-    libssl-dev \
-    git \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+FROM python:3.12
 
 WORKDIR /app
 
