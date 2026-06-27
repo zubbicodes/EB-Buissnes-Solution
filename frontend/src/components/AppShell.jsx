@@ -25,7 +25,8 @@ export default function AppShell({ children }) {
   const location = useLocation();
   const [searchTerm, setSearchTerm] = useState("");
   const [notificationCount, setNotificationCount] = useState(0);
-  const hideTopbar = location.pathname === "/new" || location.pathname.startsWith("/allocations/");
+  const hideTopbar = location.pathname === "/new" || location.pathname.startsWith("/allocations/") || location.pathname === "/debtors" || location.pathname === "/audit" || location.pathname === "/compare";
+  const compactLayout = location.pathname === "/new" || location.pathname.startsWith("/allocations/");
   const initials = (user?.name || user?.email || "JD")
     .split(/[ @.]/)
     .filter(Boolean)
@@ -160,7 +161,7 @@ export default function AppShell({ children }) {
           </nav>
         </div>
 
-        <div className={`eb-main-inner ${hideTopbar ? "eb-main-inner-compact" : ""}`}>
+        <div className={`eb-main-inner ${compactLayout ? "eb-main-inner-compact" : ""}`}>
           {!hideTopbar && (
             <div className="eb-topbar">
               <h2 className="eb-welcome-title">Welcome!</h2>

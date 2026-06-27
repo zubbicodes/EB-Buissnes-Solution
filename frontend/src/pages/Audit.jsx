@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { api, formatError } from "@/lib/api";
 import { toast } from "sonner";
-import { Mail, PlusCircle, Trash2, ExternalLink } from "lucide-react";
+import { Mail, PlusCircle, Trash2, ExternalLink, HelpCircle } from "lucide-react";
 import { EmptyState, PageHeader, StatCard } from "@/components/DesignSystem";
 
 export default function Audit() {
@@ -23,6 +23,12 @@ export default function Audit() {
         eyebrow="Trail"
         title="Audit Log"
         description="Every upload, manual override and deletion, with timestamps."
+        action={
+          <button type="button" className="eb-help-outline" data-testid="help-button">
+            <HelpCircle className="h-[14px] w-[14px]" />
+            <span>Need help?</span>
+          </button>
+        }
       />
 
       {data && (

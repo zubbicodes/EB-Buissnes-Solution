@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { api, fmtGBP, formatError, downloadAuthed } from "@/lib/api";
 import { toast } from "sonner";
-import { ChevronDown, ChevronRight, Download, Flag, PoundSterling, Users, Wallet } from "lucide-react";
+import { ChevronDown, ChevronRight, Download, Flag, PoundSterling, Users, Wallet, HelpCircle } from "lucide-react";
 import { EmptyState, PageHeader, StatCard } from "@/components/DesignSystem";
 
 export default function Debtors() {
@@ -39,6 +39,12 @@ export default function Debtors() {
         eyebrow="Debtors"
         title="Debtor Report"
         description="Aggregated outstanding across every allocation run, with threshold flagging."
+        action={
+          <button type="button" className="eb-help-outline" data-testid="help-button">
+            <HelpCircle className="h-[14px] w-[14px]" />
+            <span>Need help?</span>
+          </button>
+        }
       />
 
       <div className="eb-panel mb-5 flex flex-wrap items-end gap-4">

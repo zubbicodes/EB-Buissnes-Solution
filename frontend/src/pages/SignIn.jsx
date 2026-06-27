@@ -2,11 +2,13 @@ import React, { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { BrandMark } from "@/components/DesignSystem";
+import { Eye, EyeOff } from "lucide-react";
 
 export default function SignIn() {
   const { login, error } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
 
@@ -51,15 +53,26 @@ export default function SignIn() {
               />
             </Field>
             <Field label="Password">
-              <input
-                data-testid="signin-password"
-                type="password"
-                required
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="eb-input w-full"
-                autoComplete="current-password"
-              />
+              <div className="relative">
+                <input
+                  data-testid="signin-password"
+                  type={showPassword ? "text" : "password"}
+                  required
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  className="eb-input w-full pr-[44px]"
+                  autoComplete="current-password"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute right-5 top-1/2 -translate-y-1/2 text-[#0F172A]/40 hover:text-[#0F172A]/70 transition-colors"
+                  tabIndex={-1}
+                  aria-label={showPassword ? "Hide password" : "Show password"}
+                >
+                  {showPassword ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
+                </button>
+              </div>
             </Field>
             {error && <div className="text-[14px] font-medium text-[#EA2E49]" data-testid="signin-error">{error}</div>}
             <button type="submit" disabled={loading} data-testid="signin-submit" className="eb-button w-full">

@@ -2,12 +2,14 @@ import React, { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { BrandMark } from "@/components/DesignSystem";
+import { Eye, EyeOff } from "lucide-react";
 
 export default function SignUp() {
   const { register, error } = useAuth();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
 
@@ -62,16 +64,27 @@ export default function SignUp() {
               />
             </Field>
             <Field label="Password">
-              <input
-                data-testid="signup-password"
-                type="password"
-                required
-                minLength={6}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="eb-input w-full"
-                autoComplete="new-password"
-              />
+              <div className="relative">
+                <input
+                  data-testid="signup-password"
+                  type={showPassword ? "text" : "password"}
+                  required
+                  minLength={6}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  className="eb-input w-full pr-[44px]"
+                  autoComplete="new-password"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute right-5 top-1/2 -translate-y-1/2 text-[#0F172A]/40 hover:text-[#0F172A]/70 transition-colors"
+                  tabIndex={-1}
+                  aria-label={showPassword ? "Hide password" : "Show password"}
+                >
+                  {showPassword ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
+                </button>
+              </div>
               <div className="mt-[14px] text-[14px] leading-none text-[#0F172A]/60">Minimum 6 characters.</div>
             </Field>
             {error && <div className="text-[14px] font-medium text-[#EA2E49]" data-testid="signup-error">{error}</div>}
