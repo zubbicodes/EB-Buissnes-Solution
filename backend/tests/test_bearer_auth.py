@@ -6,7 +6,7 @@ import os
 import requests
 import pytest
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://bank-reconcile-37.preview.emergentagent.com").rstrip("/")
+BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "http://localhost:8000").rstrip("/")
 
 ADMIN_EMAIL = "admin@ebbusiness.com"
 ADMIN_PASSWORD = "Admin@2026!"

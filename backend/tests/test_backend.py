@@ -1,6 +1,6 @@
 import os, uuid, requests, pytest
 
-BASE = os.environ.get('REACT_APP_BACKEND_URL', 'https://bank-reconcile-37.preview.emergentagent.com').rstrip('/')
+BASE = os.environ.get('REACT_APP_BACKEND_URL', 'http://localhost:8000').rstrip('/')
 API = f"{BASE}/api"
 
 BANK_CSV = """date,reference,amount,payer

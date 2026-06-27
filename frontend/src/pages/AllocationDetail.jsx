@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from "react";
 import { useParams, Link } from "react-router-dom";
 import { api, fmtGBP, formatError, downloadAuthed } from "@/lib/api";
 import { toast } from "sonner";
-import { ArrowLeft, Download, Link2, AlertTriangle, FileSpreadsheet, ChevronLeft, ChevronRight, Search, Eye, ArrowRight } from "lucide-react";
+import { ArrowLeft, Download, Link2, AlertTriangle, FileSpreadsheet, ChevronLeft, ChevronRight, Search, Eye, ArrowRight, PoundSterling, CheckCircle2, XCircle, FileText } from "lucide-react";
 
 const TABS = [
   { id: "full", label: "Confirmed" },
@@ -149,23 +149,23 @@ export default function AllocationDetail() {
   };
 
   return (
-    <div data-testid="allocation-detail-page">
-      <Link to="/dashboard" className="inline-flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-900 mb-3" data-testid="back-to-dashboard">
+    <div className="eb-detail-page" data-testid="allocation-detail-page">
+      <Link to="/dashboard" className="eb-detail-back" data-testid="back-to-dashboard">
         <ArrowLeft className="h-3.5 w-3.5" /> Back to dashboard
       </Link>
-      <div className="flex items-end justify-between mb-8">
+      <div className="eb-detail-header">
         <div>
-          <h1 className="font-display font-bold text-3xl tracking-tight">{run.name}</h1>
+          <h1>{run.name}</h1>
           <p className="text-slate-500 text-sm mt-1">Period {run.period} · Created {new Date(run.created_at).toLocaleString("en-GB")}</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="eb-detail-actions">
           <button onClick={() => handleExport("xlsx")} disabled={exporting !== null} data-testid="export-xlsx"
-            className="inline-flex items-center gap-2 bg-emerald-600 text-white font-semibold px-4 py-2.5 rounded-md hover:bg-emerald-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed">
+            className="eb-detail-export-secondary disabled:opacity-60 disabled:cursor-not-allowed">
             <FileSpreadsheet className="h-4 w-4" />
             {exporting === "xlsx" ? "Preparing…" : "Export Excel"}
           </button>
           <button onClick={() => handleExport("csv")} disabled={exporting !== null} data-testid="export-csv"
-            className="inline-flex items-center gap-2 bg-[#0F172A] text-white font-semibold px-4 py-2.5 rounded-md hover:bg-slate-800 transition-colors disabled:opacity-60 disabled:cursor-not-allowed">
+            className="eb-detail-export-primary disabled:opacity-60 disabled:cursor-not-allowed">
             <Download className="h-4 w-4" />
             {exporting === "csv" ? "Preparing…" : "Export CSV"}
           </button>
@@ -173,31 +173,34 @@ export default function AllocationDetail() {
       </div>
 
       {highUnmatched && (
-        <div className="border border-amber-200 bg-amber-50 rounded-md p-4 mb-6 flex items-start gap-3" data-testid="high-unmatched-banner">
-          <AlertTriangle className="h-5 w-5 text-amber-700 mt-0.5 shrink-0" />
+        <div className="eb-detail-alert" data-testid="high-unmatched-banner">
+          <div className="eb-detail-alert-icon"><AlertTriangle className="h-6 w-6" /></div>
           <div>
-            <div className="font-semibold text-amber-900">High unmatched rate: {unmatchedRate}%</div>
-            <div className="text-sm text-amber-900 mt-1">
+            <div className="eb-detail-alert-title">High unmatched rate: {unmatchedRate}%</div>
+            <div className="eb-detail-alert-copy">
               {run.stats.unmatched_bank} of {total} bank receipts could not be matched automatically.
               Review the <button onClick={() => setTab("unmatched_bank")} className="font-semibold underline">Unmatched Bank</button> tab.
             </div>
           </div>
+          <button onClick={() => setTab("unmatched_bank")} className="eb-detail-alert-button">
+            Review Unmatched Bank <ArrowRight className="h-4 w-4" />
+          </button>
         </div>
       )}
 
-      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-8">
-        <Stat label="Total allocated" value={fmtGBP(run.stats.total_allocated)} tone="emerald" testid="stat-total" />
-        <Stat label="Confirmed" value={run.stats.fully_matched} tone="emerald" testid="stat-full" />
-        <Stat label="Suggested (review)" value={run.stats.partially_matched} tone="amber" testid="stat-partial" />
-        <Stat label="Unmatched bank" value={run.stats.unmatched_bank} tone="rose" testid="stat-unmatched-bank" />
-        <Stat label="Unmatched invoices" value={run.stats.unmatched_invoices} tone="rose" testid="stat-unmatched-invoice" />
+      <div className="eb-detail-stat-grid">
+        <Stat icon={PoundSterling} label="Total Allocated" value={fmtGBP(run.stats.total_allocated)} tone="slate" testid="stat-total" />
+        <Stat icon={CheckCircle2} label="Confirmed" value={run.stats.fully_matched} tone="slate" testid="stat-full" />
+        <Stat icon={AlertTriangle} label="Suggested (Review)" value={run.stats.partially_matched} tone="amber" testid="stat-partial" />
+        <Stat icon={XCircle} label="Unmatched Bank" value={run.stats.unmatched_bank} tone="rose" testid="stat-unmatched-bank" />
+        <Stat icon={FileText} label="Unmatched Invoices" value={run.stats.unmatched_invoices} tone="rose" testid="stat-unmatched-invoice" />
       </div>
 
-      <div className="border-b border-slate-200 flex gap-1 mb-6">
+      <div className="eb-detail-tabs">
         {TABS.map((t) => (
           <button key={t.id} onClick={() => setTab(t.id)} data-testid={`tab-${t.id}`}
-            className={`px-4 py-2.5 text-sm font-semibold border-b-2 -mb-px transition-colors ${
-              tab === t.id ? "border-emerald-600 text-emerald-700" : "border-transparent text-slate-500 hover:text-slate-800"
+            className={`eb-detail-tab ${
+              tab === t.id ? "eb-detail-tab-active" : ""
             }`}>
             {t.label}
           </button>
@@ -205,14 +208,14 @@ export default function AllocationDetail() {
       </div>
 
       {tab !== "audit" && (
-        <div className="flex items-center justify-between mb-3 gap-3">
-          <div className="relative flex-1 max-w-md">
+        <div className="eb-detail-filter-row">
+          <div className="relative flex-1 max-w-[520px]">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder={tab === "unmatched_invoice" ? "Search by invoice # or debtor…" : "Search by reference, payer, or invoice #…"}
-              className="w-full border border-slate-200 rounded-md pl-9 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
+              className="eb-input !h-11 w-full !pl-9 !text-[14px]"
               data-testid="rows-search"
             />
           </div>
@@ -253,16 +256,13 @@ export default function AllocationDetail() {
   );
 }
 
-function Stat({ label, value, tone, testid }) {
-  const map = {
-    emerald: "border-emerald-200 bg-emerald-50 text-emerald-800",
-    amber: "border-amber-200 bg-amber-50 text-amber-800",
-    rose: "border-rose-200 bg-rose-50 text-rose-800",
-  };
+function Stat({ icon: Icon, label, value, tone, testid }) {
   return (
-    <div className={`rounded-md border p-4 ${map[tone]}`} data-testid={testid}>
-      <div className="text-[10px] uppercase tracking-wider font-semibold">{label}</div>
-      <div className="font-display font-bold text-xl mt-1 tabular-nums">{value}</div>
+    <div className={`eb-detail-stat eb-detail-stat-${tone}`} data-testid={testid}>
+      <div className="eb-detail-stat-icon">{Icon && <Icon className="h-[18px] w-[18px]" />}</div>
+      <div className="eb-detail-stat-label">{label}</div>
+      <div className="eb-detail-stat-value">{value}</div>
+      <div className="eb-detail-stat-wave" aria-hidden="true" />
     </div>
   );
 }
@@ -304,9 +304,9 @@ function BankTable({ rows, showLink, onLink, onReview }) {
     }
   });
   return (
-    <div className="bg-white border border-slate-200 rounded-md overflow-x-auto scroll-area-thin" data-testid="bank-table">
-      <table className="w-full text-sm min-w-[1320px]">
-        <thead className="bg-slate-50 text-xs uppercase tracking-wider text-slate-600">
+    <div className="eb-table-wrap scroll-area-thin" data-testid="bank-table">
+      <table className="eb-table min-w-[1320px]">
+        <thead>
           <tr>
             <Th>Date</Th>
             <Th>Bank reference</Th>
@@ -554,9 +554,9 @@ function ReviewLine({ label, value }) {
 function InvoiceTable({ rows, onLink }) {
   if (rows.length === 0) return <Empty label="All invoices are at least partially matched." />;
   return (
-    <div className="bg-white border border-slate-200 rounded-md overflow-hidden" data-testid="invoice-table">
-      <table className="w-full text-sm">
-        <thead className="bg-slate-50 text-xs uppercase tracking-wider text-slate-600">
+    <div className="eb-table-wrap" data-testid="invoice-table">
+      <table className="eb-table">
+        <thead>
           <tr>
             <Th>Invoice #</Th><Th>Debtor</Th><Th>Date</Th>
             <Th right>Amount</Th><Th right>Outstanding</Th><Th />
@@ -587,9 +587,9 @@ function InvoiceTable({ rows, onLink }) {
 function AuditTable({ logs }) {
   if (logs.length === 0) return <Empty label="No audit events for this run yet." />;
   return (
-    <div className="bg-white border border-slate-200 rounded-md overflow-hidden" data-testid="audit-table">
-      <table className="w-full text-sm">
-        <thead className="bg-slate-50 text-xs uppercase tracking-wider text-slate-600">
+    <div className="eb-table-wrap" data-testid="audit-table">
+      <table className="eb-table">
+        <thead>
           <tr><Th>Timestamp</Th><Th>Action</Th><Th>Details</Th></tr>
         </thead>
         <tbody>
@@ -713,14 +713,14 @@ function ManualLinkDialog({ runId, context, onClose, onLinked }) {
         <div className="mt-4">
           <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">Amount to allocate (£)</div>
           <input value={amount} onChange={(e) => setAmount(e.target.value)} type="number" step="0.01"
-            className="w-full md:w-60 border border-slate-200 rounded-md px-3 py-2 text-sm"
+            className="eb-input w-full md:w-60"
             data-testid="dialog-amount" />
         </div>
 
         <div className="flex items-center justify-end gap-2 mt-6">
           <button onClick={onClose} className="px-4 py-2 text-sm font-semibold text-slate-600 hover:text-slate-900" data-testid="dialog-cancel">Cancel</button>
           <button onClick={submit} disabled={!bankId || !invoiceId || !amount || busy} data-testid="dialog-confirm"
-            className="gradient-cta text-white font-semibold px-5 py-2 rounded-md disabled:opacity-50">
+            className="eb-button disabled:opacity-50">
             {busy ? "Linking…" : "Confirm link"}
           </button>
         </div>
@@ -736,7 +736,7 @@ function SearchableList({ label, search, setSearch, placeholder, rows, selectedI
       <div className="relative mb-2">
         <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-400" />
         <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder={placeholder}
-          className="w-full border border-slate-200 rounded-md pl-8 pr-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
+          className="eb-input !h-10 w-full !pl-8 !text-[14px]"
           data-testid={`${testid}-search`} />
       </div>
       <div className="border border-slate-200 rounded-md max-h-64 overflow-y-auto divide-y divide-slate-100" data-testid={testid}>
@@ -758,5 +758,5 @@ function Th({ children, right }) {
 }
 
 function Empty({ label }) {
-  return <div className="border border-dashed border-slate-200 rounded-md py-12 text-center text-sm text-slate-500" data-testid="empty-bucket">{label}</div>;
+  return <div className="eb-empty-state" data-testid="empty-bucket">{label}</div>;
 }

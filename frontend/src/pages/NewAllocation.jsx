@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, formatError } from "@/lib/api";
 import { toast } from "sonner";
-import { ArrowLeft, ArrowRight, Check, FileUp, AlertCircle, CheckCircle2 } from "lucide-react";
+import { ArrowLeft, ArrowRight, Check, FileUp, AlertCircle, CheckCircle2, HelpCircle } from "lucide-react";
 
 const BANK_FIELDS = [
   ["bank_date", "Transaction Date", false],
@@ -135,39 +135,55 @@ export default function NewAllocation() {
     (step === 4 && validation?.ok);
 
   return (
-    <div data-testid="new-allocation-page">
-      <div className="flex items-center justify-between mb-8">
-        <h1 className="font-display font-bold text-3xl tracking-tight">New allocation</h1>
-        <div className="text-sm text-slate-500">Step {step} of 4</div>
+    <div className="eb-allocation-page" data-testid="new-allocation-page">
+      <div className="eb-allocation-header">
+        <div>
+          <h1>New allocation</h1>
+          <p>Create a new cash allocation run in four simple steps.</p>
+        </div>
+        <button type="button" className="eb-help-outline" data-testid="help-button">
+          <HelpCircle className="h-[14px] w-[14px]" />
+          <span>Need help?</span>
+        </button>
       </div>
 
-      <div className="flex items-center gap-2 mb-8">
+      <div className="eb-allocation-stepper">
         {steps.map((label, i) => {
           const n = i + 1;
           const active = n === step, done = n < step;
           return (
-            <div key={label} className="flex items-center flex-1">
-              <div className={`h-8 w-8 rounded-full flex items-center justify-center text-xs font-semibold ${
-                done ? "bg-emerald-600 text-white" : active ? "bg-[#0F172A] text-white" : "bg-slate-200 text-slate-500"
-              }`}>{done ? <Check className="h-4 w-4" /> : n}</div>
-              <div className={`ml-3 text-sm font-medium ${active ? "text-slate-900" : "text-slate-400"}`}>{label}</div>
-              {i < steps.length - 1 && <div className="flex-1 h-px bg-slate-200 mx-3" />}
+            <div key={label} className="eb-allocation-step">
+              <div className={`eb-step-circle ${active ? "eb-step-active" : ""} ${done ? "eb-step-done" : ""}`}>
+                {done ? <Check className="h-4 w-4" /> : n}
+              </div>
+              <div>
+                <div className="eb-step-label">{label}</div>
+                <div className="eb-step-description">
+                  {i === 0 && "Enter run name & period"}
+                  {i === 1 && "Upload bank statement"}
+                  {i === 2 && "Upload invoices & map fields"}
+                  {i === 3 && "Review & start allocation"}
+                </div>
+              </div>
+              {i < steps.length - 1 && (
+                <div className={`eb-step-connector ${n < step ? "eb-step-connector-done" : ""} ${n === step ? "eb-step-connector-active" : ""}`} />
+              )}
             </div>
           );
         })}
       </div>
 
-      <div className="bg-white border border-slate-200 rounded-md p-8 min-h-[420px]">
+      <div className="eb-allocation-panel">
         {step === 1 && (
-          <div className="max-w-xl space-y-6" data-testid="step-1">
+          <div className="eb-allocation-details" data-testid="step-1">
             <Field label="Run name">
               <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. January 2026 cash receipts"
-                className="w-full border border-slate-200 rounded-md px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500"
+                className="eb-allocation-input"
                 data-testid="run-name-input" />
             </Field>
             <Field label="Period">
               <input value={period} onChange={(e) => setPeriod(e.target.value)} placeholder="e.g. 2026-01"
-                className="w-full border border-slate-200 rounded-md px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500"
+                className="eb-allocation-input"
                 data-testid="run-period-input" />
             </Field>
           </div>
@@ -192,7 +208,7 @@ export default function NewAllocation() {
               <div className="flex items-center justify-between mb-4">
                 <h3 className="font-display font-semibold text-lg">Column mapping</h3>
                 <button onClick={() => detectHeaders(false)} disabled={loading} data-testid="detect-headers-btn"
-                  className="text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-md transition-colors">
+                  className="eb-button-secondary !h-9 !px-3 !text-[13px]">
                   {loading ? "Detecting…" : "Auto-detect"}
                 </button>
               </div>
@@ -208,12 +224,12 @@ export default function NewAllocation() {
         )}
 
         {step === 4 && (
-          <div data-testid="step-4">
-            <h3 className="font-display font-semibold text-lg mb-2">Validate &amp; Run</h3>
-            <p className="text-sm text-slate-500 mb-6">We&rsquo;ll check your CSVs before allocating. Errors block submission; warnings can be acknowledged.</p>
+          <div className="eb-validation-step" data-testid="step-4">
+            <h3>Validate &amp; Run</h3>
+            <p>We&rsquo;ll check your CSVs before allocating. Errors block submission; warnings can be acknowledged.</p>
             {!validation && (
               <button onClick={validate} disabled={loading} data-testid="validate-button"
-                className="inline-flex items-center gap-2 bg-[#0F172A] text-white font-semibold px-5 py-2.5 rounded-md hover:bg-slate-800 transition-colors">
+                className="eb-validation-button">
                 {loading ? "Validating…" : "Run validation"}
               </button>
             )}
@@ -222,14 +238,14 @@ export default function NewAllocation() {
         )}
       </div>
 
-      <div className="flex items-center justify-between mt-6">
+      <div className="eb-allocation-footer">
         <button onClick={() => setStep((s) => Math.max(1, s - 1))} disabled={step === 1}
-          className="inline-flex items-center gap-2 px-4 py-2.5 text-slate-600 disabled:opacity-40 hover:text-slate-900"
+          className="eb-allocation-back disabled:opacity-40"
           data-testid="wizard-back">
           <ArrowLeft className="h-4 w-4" /> Back
         </button>
         <button onClick={next} disabled={!canNext || loading} data-testid="wizard-next"
-          className="inline-flex items-center gap-2 gradient-cta text-white font-semibold px-6 py-2.5 rounded-md disabled:opacity-50">
+          className="eb-allocation-continue disabled:opacity-50">
           {step === 4 ? (loading ? "Allocating…" : "Run allocation") : "Continue"} <ArrowRight className="h-4 w-4" />
         </button>
       </div>
@@ -281,34 +297,34 @@ function CsvStep({ title, description, value, setValue, sample, testid }) {
 
   return (
     <div>
-      <h3 className="font-display font-semibold text-lg">{title}</h3>
-      <p className="text-sm text-slate-500 mt-1">{description}</p>
+      <h3 className="font-display text-[24px] font-medium leading-none tracking-normal">{title}</h3>
+      <p className="mt-6 text-[18px] leading-none text-[#0F172A]/60">{description}</p>
 
       <div
         onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
         onDragLeave={() => setDragOver(false)}
         onDrop={onDrop}
-        className={`mt-4 rounded-md border-2 border-dashed transition-colors p-6 text-center ${
-          dragOver ? "border-emerald-500 bg-emerald-50" : "border-slate-200 bg-slate-50/40"
+        className={`mt-8 rounded-[8px] border border-dashed transition-colors px-6 py-12 text-center ${
+          dragOver ? "border-[#45AE8D] bg-[#45AE8D]/10" : "border-[#0F172A]/10 bg-[#F8FAFB]"
         }`}
         data-testid={`${testid}-dropzone`}
       >
-        <FileUp className="h-7 w-7 text-slate-400 mx-auto" />
-        <div className="mt-2 text-sm text-slate-600">
-          <label className="inline-flex items-center gap-1.5 font-semibold text-emerald-700 hover:underline cursor-pointer">
+        <FileUp className="mx-auto h-8 w-8 text-[#0F172A]/40" />
+        <div className="mt-5 text-[16px] text-[#0F172A]/60">
+          <label className="inline-flex cursor-pointer items-center gap-1.5 font-medium text-[#45AE8D] hover:underline">
             Click to upload
             <input ref={inputRef} type="file" accept=".csv,text/csv" className="hidden" onChange={onFile} data-testid={`${testid}-file`} />
           </label>
           <span className="text-slate-500"> or drag &amp; drop a .csv here</span>
         </div>
-        <div className="mt-2 text-xs text-slate-400">
-          <button onClick={() => setValue(sample)} className="font-semibold text-emerald-700 hover:underline" data-testid={`${testid}-sample`}>
+        <div className="mt-4 text-[14px] text-[#0F172A]/40">
+          <button onClick={() => setValue(sample)} className="font-medium text-[#45AE8D] hover:underline" data-testid={`${testid}-sample`}>
             Or use sample data
           </button>
           {value && (
             <>
               <span className="mx-2">·</span>
-              <button onClick={() => setValue("")} className="font-semibold text-slate-500 hover:text-slate-800" data-testid={`${testid}-clear`}>
+              <button onClick={() => setValue("")} className="font-medium text-[#0F172A]/60 hover:text-[#0F172A]" data-testid={`${testid}-clear`}>
                 Clear
               </button>
             </>
@@ -322,9 +338,9 @@ function CsvStep({ title, description, value, setValue, sample, testid }) {
             <div className="font-semibold uppercase tracking-wider">Preview · first 4 rows</div>
             <div>{rowCount} data rows total</div>
           </div>
-          <div className="border border-slate-200 rounded-md overflow-x-auto bg-white" data-testid={`${testid}-preview-table`}>
-            <table className="w-full text-xs">
-              <thead className="bg-slate-50 text-slate-600 uppercase tracking-wider">
+          <div className="eb-table-wrap" data-testid={`${testid}-preview-table`}>
+            <table className="eb-table !min-w-[720px] !text-[13px]">
+              <thead>
                 <tr>{preview.headers.map((h, i) => <th key={i} className="px-3 py-2 text-left font-semibold whitespace-nowrap">{h}</th>)}</tr>
               </thead>
               <tbody>
@@ -346,7 +362,7 @@ function CsvStep({ title, description, value, setValue, sample, testid }) {
         <summary className="text-xs text-slate-500 cursor-pointer hover:text-slate-800">Or paste raw CSV text</summary>
         <textarea value={value} onChange={(e) => setValue(e.target.value)} rows={8} spellCheck={false}
           placeholder="Paste your CSV here…"
-          className="mt-2 w-full border border-slate-200 rounded-md p-3 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
+          className="eb-input mt-3 w-full"
           data-testid={`${testid}-textarea`} />
       </details>
     </div>
@@ -465,8 +481,8 @@ function Mini({ label, value, tone }) {
 function Field({ label, children }) {
   return (
     <label className="block">
-      <span className="text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">{label}</span>
-      <div className="mt-1.5">{children}</div>
+      <span className="eb-label">{label}</span>
+      <div className="mt-[18px]">{children}</div>
     </label>
   );
 }

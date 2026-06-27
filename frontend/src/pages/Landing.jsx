@@ -1,6 +1,7 @@
 import React from "react";
 import { Link } from "react-router-dom";
 import { ArrowRight, FileCheck2, GitCompareArrows, ScrollText, ShieldCheck, Workflow, Users } from "lucide-react";
+import { ReconciliationPreview } from "@/components/BrandVisuals";
 
 const features = [
   { icon: Workflow, title: "Auto-allocate cash", desc: "Match bank receipts to invoices using reference patterns and fuzzy debtor names." },
@@ -61,11 +62,7 @@ export default function Landing() {
         </div>
         <div className="relative">
           <div className="absolute -inset-6 bg-gradient-to-br from-emerald-500/10 to-blue-500/10 rounded-2xl blur-2xl" />
-          <img
-            src="https://static.prod-images.emergentagent.com/jobs/5ce91e6c-a15e-42d6-b434-deebaf15803a/images/449e94747ff5c81ab21e97d5b7267b79d05f388d880f9a3498beb04db0f839d8.png"
-            alt="Cash allocation visual"
-            className="relative rounded-xl border border-slate-200 shadow-sm"
-          />
+          <ReconciliationPreview />
         </div>
       </section>
 

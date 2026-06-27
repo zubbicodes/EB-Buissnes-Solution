@@ -9,7 +9,7 @@
 
 import os, time, uuid, requests, pytest
 
-BASE = (os.environ.get('REACT_APP_BACKEND_URL') or 'https://bank-reconcile-37.preview.emergentagent.com').rstrip('/')
+BASE = (os.environ.get('REACT_APP_BACKEND_URL') or 'http://localhost:8000').rstrip('/')
 API = f"{BASE}/api"
 
 

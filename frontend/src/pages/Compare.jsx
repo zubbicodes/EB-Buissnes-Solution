@@ -2,12 +2,13 @@ import React, { useEffect, useState } from "react";
 import { api, fmtGBP, formatError } from "@/lib/api";
 import { toast } from "sonner";
 import { AlertTriangle } from "lucide-react";
+import { PageHeader } from "@/components/DesignSystem";
 
 const STATUS_BADGE = {
-  full: "bg-emerald-100 text-emerald-800 border-emerald-200",
-  partial: "bg-amber-100 text-amber-800 border-amber-200",
-  unmatched: "bg-rose-100 text-rose-800 border-rose-200",
-  absent: "bg-slate-100 text-slate-500 border-slate-200",
+  full: "border-[#45AE8D]/20 bg-[#45AE8D]/10 text-[#45AE8D]",
+  partial: "border-[#FEC670]/30 bg-[#FEC670]/15 text-[#B45309]",
+  unmatched: "border-[#FB1A41]/20 bg-[#FB1A41]/10 text-[#EA2E49]",
+  absent: "border-[#0F172A]/10 bg-[#0F172A]/5 text-[#0F172A]/50",
 };
 
 export default function Compare() {
@@ -31,30 +32,29 @@ export default function Compare() {
 
   return (
     <div data-testid="compare-page">
-      <div className="mb-8">
-        <div className="text-xs font-semibold uppercase tracking-[0.2em] text-emerald-700">Multi-period</div>
-        <h1 className="font-display font-bold text-3xl tracking-tight mt-2">Compare allocation runs</h1>
-        <p className="text-slate-500 text-sm mt-1">Stack two or more runs side-by-side and spot persistently unmatched debtors.</p>
-      </div>
+      <PageHeader
+        eyebrow="Multi-period"
+        title="Compare allocation runs"
+        description="Stack two or more runs side-by-side and spot persistently unmatched debtors."
+      />
 
-      <div className="bg-white border border-slate-200 rounded-md p-5 mb-6">
-        <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-3">Select runs</div>
-        <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-2">
+      <div className="eb-panel mb-6">
+        <div className="eb-label mb-4">Select runs</div>
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {runs.map((r) => (
-            <label key={r.id} className={`flex items-center gap-2 px-3 py-2 rounded-md border cursor-pointer text-sm ${
-              selected.includes(r.id) ? "border-emerald-500 bg-emerald-50" : "border-slate-200 hover:bg-slate-50"
+            <label key={r.id} className={`flex min-h-[74px] cursor-pointer items-center gap-3 rounded-[8px] border px-4 transition-colors ${
+              selected.includes(r.id) ? "border-[#45AE8D] bg-[#45AE8D]/10" : "border-[#0F172A]/5 bg-[#F8FAFB] hover:bg-white"
             }`} data-testid={`compare-pick-${r.id}`}>
-              <input type="checkbox" checked={selected.includes(r.id)} onChange={() => toggle(r.id)} className="accent-emerald-600" />
-              <div className="flex-1">
-                <div className="font-semibold">{r.name}</div>
-                <div className="text-xs text-slate-500">{r.period}</div>
+              <input type="checkbox" checked={selected.includes(r.id)} onChange={() => toggle(r.id)} className="h-4 w-4 accent-[#45AE8D]" />
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-[16px] font-medium">{r.name}</div>
+                <div className="mt-1 text-[13px] text-[#0F172A]/60">{r.period}</div>
               </div>
             </label>
           ))}
         </div>
-        <div className="mt-4 flex items-center justify-end">
-          <button onClick={run} disabled={selected.length < 2} data-testid="compare-run"
-            className="gradient-cta text-white font-semibold px-5 py-2.5 rounded-md disabled:opacity-50">
+        <div className="mt-5 flex justify-end">
+          <button onClick={run} disabled={selected.length < 2} data-testid="compare-run" className="eb-button">
             Compare ({selected.length})
           </button>
         </div>
@@ -63,18 +63,18 @@ export default function Compare() {
       {data && (
         <>
           {data.consistently_unmatched.length > 0 && (
-            <div className="border border-rose-200 bg-rose-50 rounded-md p-4 mb-6 flex items-start gap-3" data-testid="consistently-unmatched">
-              <AlertTriangle className="h-5 w-5 text-rose-700 mt-0.5" />
+            <div className="mb-6 flex items-start gap-3 rounded-[8px] border border-[#FB1A41]/20 bg-[#FB1A41]/10 p-5" data-testid="consistently-unmatched">
+              <AlertTriangle className="mt-0.5 h-5 w-5 text-[#EA2E49]" />
               <div>
-                <div className="font-semibold text-rose-900">Consistently unmatched debtors</div>
-                <div className="text-sm text-rose-900 mt-1">
+                <div className="font-semibold text-[#0F172A]">Consistently unmatched debtors</div>
+                <div className="mt-1 text-[14px] text-[#0F172A]/70">
                   Unmatched across every selected run: <strong>{data.consistently_unmatched.join(", ")}</strong>
                 </div>
               </div>
             </div>
           )}
 
-          <div className="mb-3 text-xs text-slate-500 flex items-center gap-3" data-testid="compare-legend">
+          <div className="mb-3 flex flex-wrap items-center gap-3 text-[13px] text-[#0F172A]/60" data-testid="compare-legend">
             <span>Legend:</span>
             <Badge tone="full">Full</Badge>
             <Badge tone="partial">Partial</Badge>
@@ -83,31 +83,31 @@ export default function Compare() {
             <span className="ml-auto">{data.rows.length} debtors</span>
           </div>
 
-          <div className="bg-white border border-slate-200 rounded-md overflow-x-auto scroll-area-thin" data-testid="compare-matrix">
-            <table className="w-full text-sm">
-              <thead className="bg-slate-50 text-xs uppercase tracking-wider text-slate-600">
+          <div className="eb-table-wrap" data-testid="compare-matrix">
+            <table className="eb-table">
+              <thead>
                 <tr>
-                  <th className="px-3 py-2.5 text-left font-semibold">Debtor</th>
+                  <th>Debtor</th>
                   {data.runs.map((r) => (
-                    <th key={r.id} className="px-3 py-2.5 text-left font-semibold">
+                    <th key={r.id}>
                       <div>{r.name}</div>
-                      <div className="text-[10px] text-slate-400 font-normal normal-case">{r.period}</div>
+                      <div className="mt-1 text-[11px] font-normal normal-case text-[#0F172A]/40">{r.period}</div>
                     </th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {data.rows.map((row) => (
-                  <tr key={row.debtor} className="border-t border-slate-100">
-                    <td className="px-3 py-2 font-semibold">{row.debtor}</td>
+                  <tr key={row.debtor}>
+                    <td className="font-medium">{row.debtor}</td>
                     {data.runs.map((r) => {
                       const cell = row.runs[r.id] || { status: "absent", outstanding: 0 };
                       return (
-                        <td key={r.id} className="px-3 py-2">
-                          <div className="flex items-center gap-2">
+                        <td key={r.id}>
+                          <div className="flex flex-wrap items-center gap-2">
                             <Badge tone={cell.status}>{cell.status}</Badge>
                             {cell.status !== "absent" && (
-                              <span className="text-xs tabular-nums text-slate-500">{fmtGBP(cell.outstanding)}</span>
+                              <span className="text-[13px] tabular-nums text-[#0F172A]/60">{fmtGBP(cell.outstanding)}</span>
                             )}
                           </div>
                         </td>
@@ -125,5 +125,5 @@ export default function Compare() {
 }
 
 function Badge({ tone, children }) {
-  return <span className={`text-[10px] px-2 py-0.5 rounded-full border font-semibold uppercase tracking-wider ${STATUS_BADGE[tone] || ""}`}>{children}</span>;
+  return <span className={`eb-badge ${STATUS_BADGE[tone] || ""}`}>{children}</span>;
 }

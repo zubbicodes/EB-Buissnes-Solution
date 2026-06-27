@@ -69,8 +69,8 @@ export const fmtGBP = (n) =>
  * Why this is non-trivial:
  *  - The Bearer token is in localStorage, so we can't use a plain <a href> link
  *    (it would be sent with no Authorization header and 401).
- *  - When the page is rendered inside a sandboxed iframe (e.g. the Emergent
- *    preview shell), Chrome silently blocks programmatic downloads from blob:
+ *  - When the page is rendered inside a sandboxed iframe, Chrome silently
+ *    blocks programmatic downloads from blob:
  *    URLs unless the parent set sandbox="... allow-downloads ...". The fetch
  *    + saveAs() approach therefore works in a regular browser tab but not in
  *    the embedded preview.
