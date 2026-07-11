@@ -4,7 +4,7 @@ import { useAuth } from "@/context/AuthContext";
 import { api } from "@/lib/api";
 import {
   LayoutDashboard, GitCompareArrows, Users, ScrollText,
-  LogOut, PlusCircle, Search,
+  LogOut, PlusCircle, Search, AlertTriangle, ShieldCheck,
 } from "lucide-react";
 import { BrandMark } from "@/components/DesignSystem";
 import topbarMoon from "@/assets/moon.png";
@@ -16,7 +16,9 @@ const navItems = [
   { to: "/new", label: "New Allocation", icon: PlusCircle, testid: "nav-new" },
   { to: "/compare", label: "Compare", icon: GitCompareArrows, testid: "nav-compare" },
   { to: "/debtors", label: "Debtor Report", icon: Users, testid: "nav-debtors" },
+  { to: "/exceptions", label: "Exceptions", icon: AlertTriangle, testid: "nav-exceptions" },
   { to: "/audit", label: "Audit Trail", icon: ScrollText, testid: "nav-audit" },
+  { to: "/users", label: "Users", icon: ShieldCheck, testid: "nav-users", adminOnly: true },
 ];
 
 export default function AppShell({ children }) {
@@ -25,8 +27,9 @@ export default function AppShell({ children }) {
   const location = useLocation();
   const [searchTerm, setSearchTerm] = useState("");
   const [notificationCount, setNotificationCount] = useState(0);
-  const hideTopbar = location.pathname === "/new" || location.pathname.startsWith("/allocations/") || location.pathname === "/debtors" || location.pathname === "/audit" || location.pathname === "/compare";
+  const hideTopbar = location.pathname === "/new" || location.pathname.startsWith("/allocations/") || location.pathname === "/debtors" || location.pathname === "/audit" || location.pathname === "/compare" || location.pathname === "/exceptions" || location.pathname === "/users";
   const compactLayout = location.pathname === "/new" || location.pathname.startsWith("/allocations/");
+  const visibleNav = navItems.filter((item) => !item.adminOnly || user?.role === "admin");
   const initials = (user?.name || user?.email || "JD")
     .split(/[ @.]/)
     .filter(Boolean)
@@ -87,6 +90,14 @@ export default function AppShell({ children }) {
       navigate("/audit");
       return;
     }
+    if (lowered.includes("exception")) {
+      navigate("/exceptions");
+      return;
+    }
+    if (lowered.includes("user") || lowered.includes("admin")) {
+      navigate("/users");
+      return;
+    }
     navigate(q ? `/dashboard?q=${encodeURIComponent(q)}` : "/dashboard");
   };
 
@@ -99,7 +110,7 @@ export default function AppShell({ children }) {
         <div className="mt-[25px] h-px bg-white/15" />
 
         <nav className="eb-nav">
-          {navItems.map((item) => (
+          {visibleNav.map((item) => (
             <NavLink
               key={item.to}
               to={item.to}
@@ -121,7 +132,7 @@ export default function AppShell({ children }) {
             </div>
             <div className="min-w-0 flex-1">
               <div className="truncate text-[16px] font-medium" data-testid="user-name">{user?.name || "John Doe"}</div>
-              <div className="mt-1 truncate text-[13px] text-[#0F172A]/60">Administrator</div>
+              <div className="mt-1 truncate text-[13px] text-[#0F172A]/60">{user?.role === "read_only" ? "Read-only" : user?.role === "user" ? "Standard User" : "Administrator"}</div>
             </div>
             <button
               onClick={signOut}
@@ -144,7 +155,7 @@ export default function AppShell({ children }) {
             </button>
           </div>
           <nav className="mt-3 flex gap-2 overflow-x-auto pb-1">
-            {navItems.map((item) => (
+            {visibleNav.map((item) => (
               <NavLink
                 key={item.to}
                 to={item.to}

@@ -1,7 +1,15 @@
 import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
-import { api, formatError, getToken, setToken } from "@/lib/api";
+import { api, formatError, setToken } from "@/lib/api";
 
 const AuthContext = createContext(null);
+
+const userFromAuth = (data) => ({
+  id: data.id,
+  email: data.email,
+  name: data.name,
+  org_id: data.org_id,
+  role: data.role,
+});
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null); // null = loading, false = unauth, object = auth
@@ -12,7 +20,6 @@ export function AuthProvider({ children }) {
       const { data } = await api.get("/auth/me");
       setUser(data);
     } catch {
-      // token invalid or expired — clear it
       setToken("");
       setUser(false);
     }
@@ -20,7 +27,6 @@ export function AuthProvider({ children }) {
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  // Global 401 → soft logout (Protected will redirect to /signin via React Router).
   useEffect(() => {
     const onLogout = () => setUser(false);
     window.addEventListener("ebrr:logout", onLogout);
@@ -32,7 +38,7 @@ export function AuthProvider({ children }) {
     try {
       const { data } = await api.post("/auth/login", { email, password });
       if (data?.access_token) setToken(data.access_token);
-      setUser({ id: data.id, email: data.email, name: data.name });
+      setUser(userFromAuth(data));
       return true;
     } catch (e) {
       setError(formatError(e));
@@ -45,7 +51,7 @@ export function AuthProvider({ children }) {
     try {
       const { data } = await api.post("/auth/register", { name, email, password });
       if (data?.access_token) setToken(data.access_token);
-      setUser({ id: data.id, email: data.email, name: data.name });
+      setUser(userFromAuth(data));
       return true;
     } catch (e) {
       setError(formatError(e));
@@ -58,7 +64,7 @@ export function AuthProvider({ children }) {
     try {
       const { data } = await api.post("/auth/google", { credential });
       if (data?.access_token) setToken(data.access_token);
-      setUser({ id: data.id, email: data.email, name: data.name });
+      setUser(userFromAuth(data));
       return true;
     } catch (e) {
       setError(formatError(e));

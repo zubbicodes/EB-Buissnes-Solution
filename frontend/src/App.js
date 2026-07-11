@@ -12,6 +12,8 @@ import AllocationDetail from "@/pages/AllocationDetail";
 import Compare from "@/pages/Compare";
 import Debtors from "@/pages/Debtors";
 import Audit from "@/pages/Audit";
+import Exceptions from "@/pages/Exceptions";
+import Users from "@/pages/Users";
 
 function Protected() {
   const { user } = useAuth();
@@ -52,7 +54,9 @@ export default function App() {
             <Route path="/allocations/:id" element={<AllocationDetail />} />
             <Route path="/compare" element={<Compare />} />
             <Route path="/debtors" element={<Debtors />} />
+            <Route path="/exceptions" element={<Exceptions />} />
             <Route path="/audit" element={<Audit />} />
+            <Route path="/users" element={<Users />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

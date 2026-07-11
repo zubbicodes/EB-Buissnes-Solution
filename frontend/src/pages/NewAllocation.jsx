@@ -44,6 +44,8 @@ export default function NewAllocation() {
   const [period, setPeriod] = useState("");
   const [bankCsv, setBankCsv] = useState("");
   const [invCsv, setInvCsv] = useState("");
+  const [bankFile, setBankFile] = useState(null);
+  const [invFile, setInvFile] = useState(null);
   const [bankHeaders, setBankHeaders] = useState([]);
   const [invHeaders, setInvHeaders] = useState([]);
   const [mapping, setMapping] = useState({});
@@ -53,7 +55,7 @@ export default function NewAllocation() {
   const detectHeaders = async (silent = false) => {
     if (!silent) setLoading(true);
     try {
-      const { data } = await api.post("/allocations/preview-headers", { bank_csv: bankCsv, invoice_csv: invCsv });
+      const { data } = await api.post("/allocations/preview-headers", { bank_csv: bankCsv, invoice_csv: invCsv, bank_file: bankFile, invoice_file: invFile });
       setBankHeaders(data.bank_headers || []);
       setInvHeaders(data.invoice_headers || []);
       // Normalize for robust matching: lowercase + strip non-alphanumerics
@@ -93,16 +95,16 @@ export default function NewAllocation() {
 
   // Auto-detect headers whenever CSV text changes (debounced)
   useEffect(() => {
-    if (!bankCsv && !invCsv) return;
+    if (!bankCsv && !invCsv && !bankFile && !invFile) return;
     const t = setTimeout(() => { detectHeaders(true); }, 400);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bankCsv, invCsv]);
+  }, [bankCsv, invCsv, bankFile, invFile]);
 
   const validate = async () => {
     setLoading(true); setValidation(null);
     try {
-      const { data } = await api.post("/allocations/validate", { bank_csv: bankCsv, invoice_csv: invCsv, mapping });
+      const { data } = await api.post("/allocations/validate", { bank_csv: bankCsv, invoice_csv: invCsv, bank_file: bankFile, invoice_file: invFile, mapping });
       setValidation(data);
     } catch (e) { toast.error(formatError(e)); }
     setLoading(false);
@@ -112,7 +114,7 @@ export default function NewAllocation() {
     setLoading(true);
     try {
       const { data } = await api.post("/allocations", {
-        name, period, bank_csv: bankCsv, invoice_csv: invCsv, mapping,
+        name, period, bank_csv: bankCsv, invoice_csv: invCsv, bank_file: bankFile, invoice_file: invFile, mapping,
         proceed_with_warnings: true,
       });
       toast.success("Allocation complete");
@@ -130,8 +132,8 @@ export default function NewAllocation() {
 
   const canNext =
     (step === 1 && name && period) ||
-    (step === 2 && bankCsv.trim().length > 0) ||
-    (step === 3 && invCsv.trim().length > 0 && mapping.bank_reference && mapping.bank_amount && mapping.invoice_number && mapping.invoice_debtor && mapping.invoice_amount) ||
+    (step === 2 && (bankCsv.trim().length > 0 || bankFile)) ||
+    (step === 3 && (invCsv.trim().length > 0 || invFile) && mapping.bank_reference && mapping.bank_amount && mapping.invoice_number && mapping.invoice_debtor && mapping.invoice_amount) ||
     (step === 4 && validation?.ok);
 
   return (
@@ -193,7 +195,7 @@ export default function NewAllocation() {
           <CsvStep
             title="Paste your bank CSV"
             description="Headers must be on the first row. Use the sample if you want a quick demo."
-            value={bankCsv} setValue={setBankCsv} sample={SAMPLE_BANK} testid="bank-csv"
+            value={bankCsv} setValue={setBankCsv} filePayload={bankFile} setFilePayload={setBankFile} sample={SAMPLE_BANK} testid="bank-csv"
           />
         )}
 
@@ -202,7 +204,7 @@ export default function NewAllocation() {
             <CsvStep
               title="Paste your invoice CSV"
               description="Each row is one open invoice. Outstanding is optional (defaults to Amount)."
-              value={invCsv} setValue={setInvCsv} sample={SAMPLE_INV} testid="invoice-csv"
+              value={invCsv} setValue={setInvCsv} filePayload={invFile} setFilePayload={setInvFile} sample={SAMPLE_INV} testid="invoice-csv"
             />
             <div className="border-t border-slate-200 pt-6">
               <div className="flex items-center justify-between mb-4">
@@ -253,22 +255,41 @@ export default function NewAllocation() {
   );
 }
 
-function CsvStep({ title, description, value, setValue, sample, testid }) {
+function CsvStep({ title, description, value, setValue, filePayload, setFilePayload, sample, testid }) {
   const inputRef = useRef(null);
   const [dragOver, setDragOver] = useState(false);
 
   const readFile = async (f) => {
     if (!f) return;
-    if (!/\.csv$/i.test(f.name) && f.type !== "text/csv") {
-      toast.error(`'${f.name}' doesn't look like a CSV file.`);
+    const isCsv = /\.csv$/i.test(f.name) || f.type === "text/csv";
+    const isXlsx = /\.xlsx$/i.test(f.name) || f.type.includes("spreadsheetml");
+    if (!isCsv && !isXlsx) {
+      toast.error(`'${f.name}' must be a CSV or XLSX file.`);
       return;
     }
     if (f.size > 25 * 1024 * 1024) {
       toast.error("File is over 25 MB — please trim it down first.");
       return;
     }
-    const text = await f.text();
-    setValue(text);
+    if (isCsv) {
+      const text = await f.text();
+      setValue(text);
+      setFilePayload(null);
+    } else {
+      const buffer = await f.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      let binary = "";
+      const chunk = 0x8000;
+      for (let i = 0; i < bytes.length; i += chunk) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+      }
+      setValue("");
+      setFilePayload({
+        name: f.name,
+        content_type: f.type || "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        data_base64: btoa(binary),
+      });
+    }
     toast.success(`Loaded ${f.name}`);
   };
 
@@ -313,24 +334,30 @@ function CsvStep({ title, description, value, setValue, sample, testid }) {
         <div className="mt-5 text-[16px] text-[#0F172A]/60">
           <label className="inline-flex cursor-pointer items-center gap-1.5 font-medium text-[#45AE8D] hover:underline">
             Click to upload
-            <input ref={inputRef} type="file" accept=".csv,text/csv" className="hidden" onChange={onFile} data-testid={`${testid}-file`} />
+            <input ref={inputRef} type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" className="hidden" onChange={onFile} data-testid={`${testid}-file`} />
           </label>
-          <span className="text-slate-500"> or drag &amp; drop a .csv here</span>
+          <span className="text-slate-500"> or drag &amp; drop a .csv/.xlsx here</span>
         </div>
         <div className="mt-4 text-[14px] text-[#0F172A]/40">
-          <button onClick={() => setValue(sample)} className="font-medium text-[#45AE8D] hover:underline" data-testid={`${testid}-sample`}>
+          <button onClick={() => { setValue(sample); setFilePayload(null); }} className="font-medium text-[#45AE8D] hover:underline" data-testid={`${testid}-sample`}>
             Or use sample data
           </button>
-          {value && (
+          {(value || filePayload) && (
             <>
               <span className="mx-2">·</span>
-              <button onClick={() => setValue("")} className="font-medium text-[#0F172A]/60 hover:text-[#0F172A]" data-testid={`${testid}-clear`}>
+              <button onClick={() => { setValue(""); setFilePayload(null); }} className="font-medium text-[#0F172A]/60 hover:text-[#0F172A]" data-testid={`${testid}-clear`}>
                 Clear
               </button>
             </>
           )}
         </div>
       </div>
+
+      {filePayload && (
+        <div className="mt-4 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">
+          Loaded XLSX: <span className="font-semibold">{filePayload.name}</span>. Column mapping is detected from the first worksheet.
+        </div>
+      )}
 
       {value && (
         <div className="mt-4">
@@ -360,7 +387,7 @@ function CsvStep({ title, description, value, setValue, sample, testid }) {
 
       <details className="mt-4">
         <summary className="text-xs text-slate-500 cursor-pointer hover:text-slate-800">Or paste raw CSV text</summary>
-        <textarea value={value} onChange={(e) => setValue(e.target.value)} rows={8} spellCheck={false}
+        <textarea value={value} onChange={(e) => { setValue(e.target.value); setFilePayload(null); }} rows={8} spellCheck={false}
           placeholder="Paste your CSV here…"
           className="eb-input mt-3 w-full"
           data-testid={`${testid}-textarea`} />

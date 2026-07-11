@@ -7,6 +7,7 @@ import { ArrowLeft, Download, Link2, AlertTriangle, FileSpreadsheet, ChevronLeft
 const TABS = [
   { id: "full", label: "Confirmed" },
   { id: "partial", label: "Suggested" },
+  { id: "overpaid", label: "Overpaid" },
   { id: "unmatched_bank", label: "Unmatched Bank" },
   { id: "unmatched_invoice", label: "Unmatched Invoice" },
   { id: "audit", label: "Audit Log" },
@@ -192,6 +193,7 @@ export default function AllocationDetail() {
         <Stat icon={PoundSterling} label="Total Allocated" value={fmtGBP(run.stats.total_allocated)} tone="slate" testid="stat-total" />
         <Stat icon={CheckCircle2} label="Confirmed" value={run.stats.fully_matched} tone="slate" testid="stat-full" />
         <Stat icon={AlertTriangle} label="Suggested (Review)" value={run.stats.partially_matched} tone="amber" testid="stat-partial" />
+        <Stat icon={AlertTriangle} label="Overpaid" value={run.stats.overpaid || 0} tone="amber" testid="stat-overpaid" />
         <Stat icon={XCircle} label="Unmatched Bank" value={run.stats.unmatched_bank} tone="rose" testid="stat-unmatched-bank" />
         <Stat icon={FileText} label="Unmatched Invoices" value={run.stats.unmatched_invoices} tone="rose" testid="stat-unmatched-invoice" />
       </div>
@@ -225,7 +227,7 @@ export default function AllocationDetail() {
         </div>
       )}
 
-      {(tab === "full" || tab === "partial") && (
+      {(tab === "full" || tab === "partial" || tab === "overpaid") && (
         <BankTable rows={tabData.rows} showLink={false} onReview={setReview} />
       )}
       {tab === "unmatched_bank" && (

@@ -371,6 +371,10 @@ h1, h2, h3, h4, h5, .font-display {
     @apply bg-[#F4FAF8] transition-colors hover:bg-[#EEF8F4];
   }
 
+  .eb-mobile-card {
+    @apply rounded-[8px] border border-[#0F172A]/5 bg-white p-4 shadow-[0_1px_0_rgba(15,23,42,0.02)];
+  }
+
   .eb-badge {
     @apply inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.08em];
   }
@@ -715,5 +719,66 @@ h1, h2, h3, h4, h5, .font-display {
 
   .eb-detail-filter-row {
     @apply mb-[24px] flex items-center justify-between gap-3;
+  }
+
+  @media (max-width: 767px) {
+    .eb-main-inner {
+      @apply px-4 pb-24 pt-5;
+    }
+
+    .eb-page-header,
+    .eb-allocation-header,
+    .eb-detail-header {
+      @apply gap-4;
+    }
+
+    .eb-title {
+      @apply text-[30px];
+    }
+
+    .eb-description {
+      @apply text-[15px] leading-6;
+    }
+
+    .eb-button,
+    .eb-button-secondary {
+      @apply h-11 px-4 text-[14px];
+    }
+
+    .eb-stat-card {
+      @apply h-[132px];
+    }
+
+    .eb-stat-label {
+      @apply left-[82px] top-[35px] text-[11px];
+    }
+
+    .eb-stat-value {
+      @apply mt-6 text-[24px];
+    }
+
+    .eb-allocation-stepper {
+      @apply grid-cols-4 gap-2;
+    }
+
+    .eb-allocation-step {
+      @apply items-center;
+    }
+
+    .eb-step-label {
+      @apply text-[11px] leading-tight;
+    }
+
+    .eb-allocation-panel {
+      @apply px-4 py-5;
+    }
+
+    .eb-detail-alert {
+      @apply items-start;
+    }
+
+    .eb-detail-filter-row {
+      @apply flex-col items-stretch;
+    }
   }
 }
