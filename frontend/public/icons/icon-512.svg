@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="EB Receivables">
+  <rect width="512" height="512" rx="86" fill="#0F172A"/>
+  <path d="M104 350c58 36 168 40 304 10" fill="none" stroke="#5EE042" stroke-width="36" stroke-linecap="round"/>
+  <g transform="skewX(-12)">
+    <rect x="180" y="242" width="44" height="108" rx="8" fill="#44E06B"/>
+    <rect x="244" y="192" width="44" height="158" rx="8" fill="#28CDA0"/>
+    <rect x="308" y="142" width="44" height="208" rx="8" fill="#2F9DF5"/>
+  </g>
+  <text x="256" y="132" text-anchor="middle" font-family="Arial, sans-serif" font-size="70" font-weight="700" fill="#FFFFFF">EB</text>
+</svg>

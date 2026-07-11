@@ -22,6 +22,8 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr
 from rapidfuzz import fuzz, process as rf_process, utils as rf_utils
 from collections import defaultdict
+from google.auth.transport import requests as google_requests
+from google.oauth2 import id_token as google_id_token
 
 
 # ----- DB / Config -----
@@ -31,6 +33,7 @@ db = client[os.environ['DB_NAME']]
 
 JWT_ALGORITHM = "HS256"
 JWT_SECRET = os.environ['JWT_SECRET']
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -86,6 +89,9 @@ class RegisterIn(BaseModel):
 class LoginIn(BaseModel):
     email: EmailStr
     password: str
+
+class GoogleAuthIn(BaseModel):
+    credential: str = Field(min_length=1)
 
 class ColumnMapping(BaseModel):
     # bank
@@ -690,12 +696,74 @@ async def register(payload: RegisterIn, response: Response):
 async def login(payload: LoginIn, response: Response):
     email = payload.email.lower()
     user = await db.users.find_one({"email": email})
-    if not user or not verify_password(payload.password, user["password_hash"]):
+    if not user or not user.get("password_hash") or not verify_password(payload.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid email or password")
+    now = datetime.now(timezone.utc).isoformat()
+    await db.users.update_one({"id": user["id"]}, {"$set": {"last_login_at": now, "updated_at": now}})
     access = create_access_token(user["id"], email)
     refresh = create_refresh_token(user["id"])
     set_auth_cookies(response, access, refresh)
     return {"id": user["id"], "email": user["email"], "name": user.get("name", ""), "access_token": access, "refresh_token": refresh}
+
+
+@api.post("/auth/google")
+async def google_auth(payload: GoogleAuthIn, response: Response):
+    if not GOOGLE_CLIENT_ID:
+        raise HTTPException(status_code=503, detail="Google Sign-In is not configured")
+
+    try:
+        google_payload = google_id_token.verify_oauth2_token(
+            payload.credential,
+            google_requests.Request(),
+            GOOGLE_CLIENT_ID,
+        )
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Invalid Google credential")
+
+    email = (google_payload.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=401, detail="Google account did not provide an email")
+    if not google_payload.get("email_verified"):
+        raise HTTPException(status_code=401, detail="Google email is not verified")
+
+    google_sub = google_payload.get("sub")
+    now = datetime.now(timezone.utc).isoformat()
+    name = (google_payload.get("name") or email.split("@")[0]).strip()
+    picture = google_payload.get("picture")
+
+    user = await db.users.find_one({"email": email})
+    if user:
+        user_id = user["id"]
+        update = {
+            "auth_provider": "google",
+            "google_sub": google_sub,
+            "picture": picture,
+            "last_login_at": now,
+            "updated_at": now,
+        }
+        if name and not user.get("name"):
+            update["name"] = name
+        await db.users.update_one({"id": user_id}, {"$set": update})
+        user_name = update.get("name") or user.get("name", "") or name
+    else:
+        user_id = str(uuid.uuid4())
+        user_name = name
+        await db.users.insert_one({
+            "id": user_id,
+            "email": email,
+            "name": user_name,
+            "auth_provider": "google",
+            "google_sub": google_sub,
+            "picture": picture,
+            "created_at": now,
+            "last_login_at": now,
+            "updated_at": now,
+        })
+
+    access = create_access_token(user_id, email)
+    refresh = create_refresh_token(user_id)
+    set_auth_cookies(response, access, refresh)
+    return {"id": user_id, "email": email, "name": user_name, "access_token": access, "refresh_token": refresh}
 
 
 @api.post("/auth/logout")

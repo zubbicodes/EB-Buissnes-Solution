@@ -8,10 +8,6 @@ export function AuthProvider({ children }) {
   const [error, setError] = useState("");
 
   const refresh = useCallback(async () => {
-    if (!getToken()) {
-      setUser(false);
-      return;
-    }
     try {
       const { data } = await api.get("/auth/me");
       setUser(data);
@@ -57,6 +53,19 @@ export function AuthProvider({ children }) {
     }
   };
 
+  const googleLogin = async (credential) => {
+    setError("");
+    try {
+      const { data } = await api.post("/auth/google", { credential });
+      if (data?.access_token) setToken(data.access_token);
+      setUser({ id: data.id, email: data.email, name: data.name });
+      return true;
+    } catch (e) {
+      setError(formatError(e));
+      return false;
+    }
+  };
+
   const logout = async () => {
     try { await api.post("/auth/logout"); } catch { /* noop */ }
     setToken("");
@@ -64,7 +73,7 @@ export function AuthProvider({ children }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, error, login, register, logout, refresh }}>
+    <AuthContext.Provider value={{ user, error, login, register, googleLogin, logout, refresh }}>
       {children}
     </AuthContext.Provider>
   );

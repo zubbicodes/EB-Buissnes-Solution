@@ -2,14 +2,16 @@ import React, { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { BrandMark } from "@/components/DesignSystem";
+import GoogleSignInButton from "@/components/GoogleSignInButton";
 import { Eye, EyeOff } from "lucide-react";
 
 export default function SignIn() {
-  const { login, error } = useAuth();
+  const { login, googleLogin, error } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [googleLoading, setGoogleLoading] = useState(false);
   const navigate = useNavigate();
 
   const submit = async (e) => {
@@ -17,6 +19,13 @@ export default function SignIn() {
     setLoading(true);
     const ok = await login(email, password);
     setLoading(false);
+    if (ok) navigate("/dashboard");
+  };
+
+  const handleGoogleCredential = async (credential) => {
+    setGoogleLoading(true);
+    const ok = await googleLogin(credential);
+    setGoogleLoading(false);
     if (ok) navigate("/dashboard");
   };
 
@@ -39,6 +48,15 @@ export default function SignIn() {
               Create an account
             </Link>
           </p>
+
+          <div className="mt-[44px]">
+            <GoogleSignInButton onCredential={handleGoogleCredential} disabled={loading || googleLoading} />
+            <div className="mt-[29px] flex items-center gap-4 text-[12px] font-semibold uppercase tracking-[0.16em] text-[#0F172A]/35">
+              <span className="h-px flex-1 bg-[#0F172A]/10" />
+              <span>or</span>
+              <span className="h-px flex-1 bg-[#0F172A]/10" />
+            </div>
+          </div>
 
           <form onSubmit={submit} className="mt-[56px] space-y-[29px]" data-testid="signin-form">
             <Field label="Email">

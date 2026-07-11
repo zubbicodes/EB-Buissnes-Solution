@@ -28,11 +28,14 @@ services:
       - MONGO_URL=mongodb://mongodb:27017
       - DB_NAME=receivables
       - JWT_SECRET=your-secret-key-change-in-production  # Change this to a real secret in production
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
       - CORS_ORIGINS=*
 
   frontend:
     build:
       context: ./frontend
+      args:
+        - REACT_APP_GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
     restart: unless-stopped
     ports:
       - "80"

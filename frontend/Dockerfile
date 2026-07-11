@@ -2,6 +2,9 @@ FROM node:20-slim as build
 
 WORKDIR /app
 
+ARG REACT_APP_GOOGLE_CLIENT_ID=""
+ENV REACT_APP_GOOGLE_CLIENT_ID=$REACT_APP_GOOGLE_CLIENT_ID
+
 COPY package.json package-lock.json ./
 RUN npm install --legacy-peer-deps
 
