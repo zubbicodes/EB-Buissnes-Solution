@@ -38,8 +38,8 @@ JWT_ALGORITHM = "HS256"
 JWT_SECRET = os.environ['JWT_SECRET']
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
 APP_ENV = os.environ.get("APP_ENV", os.environ.get("ENV", "development")).lower()
-COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "true" if APP_ENV == "production" else "false").lower() == "true"
-ALLOW_DEFAULT_ADMIN = os.environ.get("ALLOW_DEFAULT_ADMIN", "true" if APP_ENV != "production" else "false").lower() == "true"
+COOKIE_SECURE = (os.environ.get("COOKIE_SECURE") or ("true" if APP_ENV == "production" else "false")).lower() == "true"
+ALLOW_DEFAULT_ADMIN = (os.environ.get("ALLOW_DEFAULT_ADMIN") or ("true" if APP_ENV != "production" else "false")).lower() == "true"
 DEFAULT_ORG_NAME = os.environ.get("DEFAULT_ORG_NAME", "EB Business Solutions Limited")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -2092,8 +2092,8 @@ async def startup():
     await db.audit_logs.update_many({"org_id": {"$exists": False}}, {"$set": {"org_id": default_org_id}})
     await db.user_mapping_profiles.update_many({"org_id": {"$exists": False}}, {"$set": {"org_id": default_org_id}})
     # Seed admin
-    admin_email = os.environ.get("ADMIN_EMAIL", "admin@ebbusiness.com").lower()
-    admin_password = os.environ.get("ADMIN_PASSWORD", "Admin@2026!")
+    admin_email = (os.environ.get("ADMIN_EMAIL") or "admin@ebbusiness.com").lower()
+    admin_password = os.environ.get("ADMIN_PASSWORD") or "Admin@2026!"
     existing = await db.users.find_one({"email": admin_email})
     if not existing and ALLOW_DEFAULT_ADMIN:
         await db.users.insert_one({

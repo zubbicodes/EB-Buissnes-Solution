@@ -1,0 +1,7 @@
+# Local development overrides — automatically merged by `docker compose up`.
+# Coolify deploys with `-f docker-compose.yml` only, so this file is ignored
+# there (which is what we want: no host port bindings on the server).
+services:
+  frontend:
+    ports:
+      - "3000:80"

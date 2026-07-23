@@ -25,9 +25,14 @@ services:
     environment:
       - MONGO_URL=mongodb://mongodb:27017
       - DB_NAME=receivables
-      - JWT_SECRET=your-secret-key-change-in-production  # Change this to a real secret in production
+      - JWT_SECRET=${JWT_SECRET:-your-secret-key-change-in-production}  # Set a real secret via env in production
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
-      - CORS_ORIGINS=*
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}
+      - APP_ENV=${APP_ENV:-development}
+      - COOKIE_SECURE=${COOKIE_SECURE:-}
+      - ALLOW_DEFAULT_ADMIN=${ALLOW_DEFAULT_ADMIN:-}
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
 
   frontend:
     build:
@@ -35,8 +40,11 @@ services:
       args:
         - REACT_APP_GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
     restart: unless-stopped
-    ports:
-      - "3000:80"
+    # No host port binding here: Coolify's proxy routes to this container
+    # directly. For local development, docker-compose.override.yml maps
+    # localhost:3000 -> 80 automatically.
+    expose:
+      - "80"
     depends_on:
       - backend
 
