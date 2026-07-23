@@ -51,11 +51,48 @@ export default function NewAllocation() {
   const [mapping, setMapping] = useState({});
   const [validation, setValidation] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [operation, setOperation] = useState(null);
+  const operationTimer = useRef(null);
+
+  const startOperation = (label, percent = 5, ceiling = 92) => {
+    clearInterval(operationTimer.current);
+    setOperation({ label, percent });
+    operationTimer.current = setInterval(() => {
+      setOperation((current) => current
+        ? { ...current, percent: Math.min(ceiling, current.percent + (current.percent < 60 ? 3 : 1)) }
+        : current);
+    }, 450);
+  };
+
+  const updateOperation = (label, percent) => {
+    setOperation((current) => ({
+      label: label || current?.label || "Working",
+      percent: Math.max(current?.percent || 0, percent),
+    }));
+  };
+
+  const finishOperation = (label = "Complete") => {
+    clearInterval(operationTimer.current);
+    setOperation({ label, percent: 100 });
+    setTimeout(() => setOperation(null), 900);
+  };
+
+  useEffect(() => () => clearInterval(operationTimer.current), []);
 
   const detectHeaders = async (silent = false) => {
     if (!silent) setLoading(true);
+    if (!silent) startOperation("Uploading file for column detection", 5, 92);
     try {
-      const { data } = await api.post("/allocations/preview-headers", { bank_csv: bankCsv, invoice_csv: invCsv, bank_file: bankFile, invoice_file: invFile });
+      const { data } = await api.post(
+        "/allocations/preview-headers",
+        { bank_csv: bankCsv, invoice_csv: invCsv, bank_file: bankFile, invoice_file: invFile },
+        !silent ? {
+          onUploadProgress: ({ loaded, total }) => {
+            if (total) updateOperation("Uploading file for column detection", Math.round((loaded / total) * 65));
+          },
+        } : undefined,
+      );
+      if (!silent) updateOperation("Analysing column headings", 90);
       setBankHeaders(data.bank_headers || []);
       setInvHeaders(data.invoice_headers || []);
       // Normalize for robust matching: lowercase + strip non-alphanumerics
@@ -83,13 +120,20 @@ export default function NewAllocation() {
         // Invoice
         invoice_number: prev.invoice_number || guess(ih, ["invoicenumber", "invoiceno", "invoice", "documentnumber", "docnumber", "docno", "documentno", "ref", "reference", "transactionid", "number", "no"]),
         invoice_debtor: prev.invoice_debtor || guess(ih, ["debtorname", "debtor", "customername", "customer", "clientname", "client", "accountname", "account", "company", "party", "name"]),
-        invoice_amount: prev.invoice_amount || guess(ih, ["invoiceamount", "amount", "grossamount", "total", "value", "balance", "outstanding", "open", "owed", "due"]),
+        invoice_amount: prev.invoice_amount || guess(ih, ["invoiceamount", "amount", "grossamount", "total", "value", "balance", "outstanding", "unpaidamount", "unpaid", "open", "owed", "due"]),
         invoice_date: prev.invoice_date || guess(ih, ["invoicedate", "documentdate", "docdate", "transactiondate", "issuedate", "date"]),
-        invoice_outstanding: prev.invoice_outstanding || guess(ih, ["outstandingamount", "outstanding", "balance", "remaining", "openamount", "open", "amountdue", "owed", "due"]),
+        invoice_outstanding: prev.invoice_outstanding || guess(ih, ["outstandingamount", "outstanding", "unpaidamount", "unpaid", "balance", "remaining", "openamount", "open", "amountdue", "owed", "due"]),
         invoice_due_date: prev.invoice_due_date || guess(ih, ["duedate", "due", "paymentdue", "maturity"]),
         invoice_customer_reference: prev.invoice_customer_reference || guess(ih, ["customerreference", "custref", "poreference", "po", "yourref"]),
       }));
-    } catch (e) { if (!silent) toast.error(formatError(e)); }
+      if (!silent) finishOperation("Columns detected");
+    } catch (e) {
+      if (!silent) {
+        clearInterval(operationTimer.current);
+        setOperation(null);
+        toast.error(formatError(e));
+      }
+    }
     if (!silent) setLoading(false);
   };
 
@@ -103,23 +147,53 @@ export default function NewAllocation() {
 
   const validate = async () => {
     setLoading(true); setValidation(null);
+    startOperation("Uploading data for validation", 5, 94);
     try {
-      const { data } = await api.post("/allocations/validate", { bank_csv: bankCsv, invoice_csv: invCsv, bank_file: bankFile, invoice_file: invFile, mapping });
+      const { data } = await api.post(
+        "/allocations/validate",
+        { bank_csv: bankCsv, invoice_csv: invCsv, bank_file: bankFile, invoice_file: invFile, mapping },
+        {
+          onUploadProgress: ({ loaded, total }) => {
+            if (total) updateOperation("Uploading data for validation", Math.round((loaded / total) * 65));
+          },
+        },
+      );
+      updateOperation("Checking rows and mapped values", 92);
       setValidation(data);
-    } catch (e) { toast.error(formatError(e)); }
+      finishOperation(data.ok ? "Validation complete" : "Validation checks complete");
+    } catch (e) {
+      clearInterval(operationTimer.current);
+      setOperation(null);
+      toast.error(formatError(e));
+    }
     setLoading(false);
   };
 
   const submit = async () => {
     setLoading(true);
+    startOperation("Uploading data for allocation", 5, 94);
     try {
-      const { data } = await api.post("/allocations", {
-        name, period, bank_csv: bankCsv, invoice_csv: invCsv, bank_file: bankFile, invoice_file: invFile, mapping,
-        proceed_with_warnings: true,
-      });
+      const { data } = await api.post(
+        "/allocations",
+        {
+          name, period, bank_csv: bankCsv, invoice_csv: invCsv, bank_file: bankFile, invoice_file: invFile, mapping,
+          proceed_with_warnings: true,
+        },
+        {
+          onUploadProgress: ({ loaded, total }) => {
+            if (total) updateOperation("Uploading data for allocation", Math.round((loaded / total) * 60));
+          },
+        },
+      );
+      updateOperation("Starting matching engine", 95);
+      finishOperation(data.status === "processing" ? "Allocation queued" : "Allocation complete");
       toast.success("Allocation complete");
       navigate(`/allocations/${data.id}`);
-    } catch (e) { toast.error(formatError(e)); }
+    } catch (e) {
+      clearInterval(operationTimer.current);
+      setOperation(null);
+      toast.error(formatError(e));
+    }
     setLoading(false);
   };
 
@@ -176,6 +250,7 @@ export default function NewAllocation() {
       </div>
 
       <div className="eb-allocation-panel">
+        {operation && <ProgressStatus label={operation.label} percent={operation.percent} />}
         {step === 1 && (
           <div className="eb-allocation-details" data-testid="step-1">
             <Field label="Run name">
@@ -258,6 +333,18 @@ export default function NewAllocation() {
 function CsvStep({ title, description, value, setValue, filePayload, setFilePayload, sample, testid }) {
   const inputRef = useRef(null);
   const [dragOver, setDragOver] = useState(false);
+  const [fileProgress, setFileProgress] = useState(null);
+
+  const readWithProgress = (file, mode) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onprogress = ({ loaded, total }) => {
+      if (total) setFileProgress({ label: `Reading ${file.name}`, percent: Math.round((loaded / total) * 90) });
+    };
+    reader.onerror = () => reject(reader.error || new Error("The file could not be read."));
+    reader.onload = () => resolve(reader.result);
+    if (mode === "text") reader.readAsText(file);
+    else reader.readAsArrayBuffer(file);
+  });
 
   const readFile = async (f) => {
     if (!f) return;
@@ -271,26 +358,35 @@ function CsvStep({ title, description, value, setValue, filePayload, setFilePayl
       toast.error("File is over 25 MB — please trim it down first.");
       return;
     }
-    if (isCsv) {
-      const text = await f.text();
-      setValue(text);
-      setFilePayload(null);
-    } else {
-      const buffer = await f.arrayBuffer();
-      const bytes = new Uint8Array(buffer);
-      let binary = "";
-      const chunk = 0x8000;
-      for (let i = 0; i < bytes.length; i += chunk) {
-        binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+    setFileProgress({ label: `Reading ${f.name}`, percent: 1 });
+    try {
+      if (isCsv) {
+        const text = await readWithProgress(f, "text");
+        setValue(text);
+        setFilePayload(null);
+      } else {
+        const buffer = await readWithProgress(f, "buffer");
+        setFileProgress({ label: `Preparing ${f.name}`, percent: 94 });
+        const bytes = new Uint8Array(buffer);
+        let binary = "";
+        const chunk = 0x8000;
+        for (let i = 0; i < bytes.length; i += chunk) {
+          binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+        }
+        setValue("");
+        setFilePayload({
+          name: f.name,
+          content_type: f.type || "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          data_base64: btoa(binary),
+        });
       }
-      setValue("");
-      setFilePayload({
-        name: f.name,
-        content_type: f.type || "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        data_base64: btoa(binary),
-      });
+      setFileProgress({ label: `${f.name} ready`, percent: 100 });
+      setTimeout(() => setFileProgress(null), 1000);
+      toast.success(`Loaded ${f.name}`);
+    } catch (error) {
+      setFileProgress(null);
+      toast.error(error?.message || `Could not read ${f.name}`);
     }
-    toast.success(`Loaded ${f.name}`);
   };
 
   const onFile = async (e) => {
@@ -353,6 +449,8 @@ function CsvStep({ title, description, value, setValue, filePayload, setFilePayl
         </div>
       </div>
 
+      {fileProgress && <ProgressStatus label={fileProgress.label} percent={fileProgress.percent} compact />}
+
       {filePayload && (
         <div className="mt-4 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">
           Loaded XLSX: <span className="font-semibold">{filePayload.name}</span>. Column mapping is detected from the first worksheet.
@@ -392,6 +490,36 @@ function CsvStep({ title, description, value, setValue, filePayload, setFilePayl
           className="eb-input mt-3 w-full"
           data-testid={`${testid}-textarea`} />
       </details>
+    </div>
+  );
+}
+
+function ProgressStatus({ label, percent, compact = false }) {
+  const safePercent = Math.max(0, Math.min(100, Math.round(percent || 0)));
+  return (
+    <div
+      className={`${compact ? "mt-4" : "mb-6"} rounded-md border border-emerald-200 bg-emerald-50 p-3`}
+      role="status"
+      aria-live="polite"
+      data-testid="progress-status"
+    >
+      <div className="mb-2 flex items-center justify-between gap-4 text-sm font-medium text-emerald-900">
+        <span>{label}</span>
+        <span className="tabular-nums">{safePercent}%</span>
+      </div>
+      <div
+        className="h-2 w-full overflow-hidden rounded-full bg-emerald-100"
+        role="progressbar"
+        aria-label={label}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={safePercent}
+      >
+        <div
+          className="h-full rounded-full bg-emerald-600 transition-[width] duration-300 ease-out"
+          style={{ width: `${safePercent}%` }}
+        />
+      </div>
     </div>
   );
 }

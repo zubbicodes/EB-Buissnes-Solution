@@ -77,7 +77,7 @@ export default function AllocationDetail() {
 
   // Reload tab when tab/search/page changes (debounce search)
   useEffect(() => {
-    if (!run || run.status !== "done") return;
+    if (!run || !["done", "archived"].includes(run.status)) return;
     const t = setTimeout(() => { loadTab(tab, page, search); }, search ? 350 : 0);
     return () => clearTimeout(t);
   }, [tab, page, search, run?.status, loadTab]); // eslint-disable-line
@@ -114,12 +114,30 @@ export default function AllocationDetail() {
           <ArrowLeft className="h-3.5 w-3.5" /> Back to dashboard
         </Link>
         <div className="bg-white border border-slate-200 rounded-md p-10 text-center">
-          <div className="h-10 w-10 mx-auto rounded-full border-4 border-emerald-200 border-t-emerald-600 animate-spin" />
           <h2 className="font-display font-semibold text-xl mt-4">Processing &ldquo;{run.name}&rdquo;</h2>
           <p className="text-sm text-slate-500 mt-2">
             Large file detected ({run.stats?.total_bank || 0} bank rows × {run.stats?.total_invoices || 0} invoices).
             We&rsquo;ll auto-refresh this page when matching is complete.
           </p>
+          <div className="mx-auto mt-6 max-w-xl text-left" role="status" aria-live="polite">
+            <div className="mb-2 flex items-center justify-between text-sm font-medium text-emerald-900">
+              <span>{run.progress_phase || "Processing allocation"}</span>
+              <span className="tabular-nums">{Math.round(run.progress || 5)}%</span>
+            </div>
+            <div
+              className="h-3 overflow-hidden rounded-full bg-emerald-100"
+              role="progressbar"
+              aria-label={run.progress_phase || "Processing allocation"}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.round(run.progress || 5)}
+            >
+              <div
+                className="h-full rounded-full bg-emerald-600 transition-[width] duration-500 ease-out"
+                style={{ width: `${Math.max(0, Math.min(100, run.progress || 5))}%` }}
+              />
+            </div>
+          </div>
         </div>
       </div>
     );
@@ -231,10 +249,10 @@ export default function AllocationDetail() {
         <BankTable rows={tabData.rows} showLink={false} onReview={setReview} />
       )}
       {tab === "unmatched_bank" && (
-        <BankTable rows={tabData.rows} showLink={true} onLink={(bankId) => setLinkDialog({ bankId })} onReview={setReview} />
+        <BankTable rows={tabData.rows} showLink={true} onLink={(bank) => setLinkDialog({ bankId: bank.id, bank })} onReview={setReview} />
       )}
       {tab === "unmatched_invoice" && (
-        <InvoiceTable rows={tabData.rows} onLink={(invoiceId) => setLinkDialog({ invoiceId })} />
+        <InvoiceTable rows={tabData.rows} onLink={(invoice) => setLinkDialog({ invoiceId: invoice.id, invoice })} />
       )}
       {tab === "audit" && <AuditTable logs={audit} />}
 
@@ -409,11 +427,16 @@ function BankTable({ rows, showLink, onLink, onReview }) {
                 </td>
                 {showLink && (
                   <td className="px-3 py-2 text-right" onClick={(ev) => ev.stopPropagation()}>
-                    {isFirst && !m && (
-                      <button onClick={() => onLink(b.id)} data-testid={`link-bank-${b.id}`}
+                    {isFirst && !m && b.remaining > 0.005 && (
+                      <button onClick={() => onLink(b)} data-testid={`link-bank-${b.id}`}
                         className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-700 hover:text-emerald-900">
                         <Link2 className="h-3.5 w-3.5" /> Link
                       </button>
+                    )}
+                    {isFirst && !m && b.remaining <= 0.005 && (
+                      <span className="text-[11px] text-slate-400" title="Only positive unallocated receipts can be linked">
+                        Not linkable
+                      </span>
                     )}
                   </td>
                 )}
@@ -573,10 +596,16 @@ function InvoiceTable({ rows, onLink }) {
               <td className="px-3 py-2 text-right tabular-nums">{fmtGBP(i.amount)}</td>
               <td className="px-3 py-2 text-right tabular-nums text-rose-700 font-semibold">{fmtGBP(i.remaining)}</td>
               <td className="px-3 py-2 text-right">
-                <button onClick={() => onLink(i.id)} data-testid={`link-invoice-${i.id}`}
-                  className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-700 hover:text-emerald-900">
-                  <Link2 className="h-3.5 w-3.5" /> Link manually
-                </button>
+                {i.remaining > 0.005 ? (
+                  <button onClick={() => onLink(i)} data-testid={`link-invoice-${i.id}`}
+                    className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-700 hover:text-emerald-900">
+                    <Link2 className="h-3.5 w-3.5" /> Link manually
+                  </button>
+                ) : (
+                  <span className="text-[11px] text-slate-400" title="Only invoices with a positive outstanding balance can be linked">
+                    Not linkable
+                  </span>
+                )}
               </td>
             </tr>
           ))}
@@ -620,8 +649,8 @@ function ManualLinkDialog({ runId, context, onClose, onLinked }) {
   const [invResults, setInvResults] = useState([]);
   const [bankTotal, setBankTotal] = useState(0);
   const [invTotal, setInvTotal] = useState(0);
-  const [selectedBank, setSelectedBank] = useState(null);
-  const [selectedInv, setSelectedInv] = useState(null);
+  const [selectedBank, setSelectedBank] = useState(context.bank || null);
+  const [selectedInv, setSelectedInv] = useState(context.invoice || null);
 
   const fetchSide = useCallback(async (bucket, search, setter, totalSetter) => {
     try {
@@ -642,13 +671,6 @@ function ManualLinkDialog({ runId, context, onClose, onLinked }) {
     const t = setTimeout(() => fetchSide("unmatched_invoice", invSearch, setInvResults, setInvTotal), 250);
     return () => clearTimeout(t);
   }, [invSearch, fetchSide]);
-
-  // If a context bank/invoice was pre-selected, fetch its details once
-  useEffect(() => {
-    if (context.bankId) {
-      api.get(`/allocations/${runId}/rows`, { params: { bucket: "unmatched_bank", page: 1, page_size: 1, search: "" } }).catch(() => {});
-    }
-  }, []); // eslint-disable-line
 
   const bank = selectedBank || bankResults.find((b) => b.id === bankId);
   const inv = selectedInv || invResults.find((i) => i.id === invoiceId);

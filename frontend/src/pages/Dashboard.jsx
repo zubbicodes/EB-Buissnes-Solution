@@ -1,13 +1,18 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { api, fmtGBP, formatError } from "@/lib/api";
+import { api, fmtGBP, formatError, downloadAuthed } from "@/lib/api";
 import { toast } from "sonner";
-import { Plus, FileText, CheckCircle2, AlertTriangle, XCircle, Search, CalendarDays, ChevronDown, MoreVertical, ArrowUp } from "lucide-react";
+import {
+  Plus, FileText, CheckCircle2, AlertTriangle, XCircle, Search, CalendarDays,
+  ChevronDown, MoreVertical, ArrowUp, Eye, Download, FileSpreadsheet, Trash2,
+} from "lucide-react";
 import { PageHeader, StatCard, EmptyState } from "@/components/DesignSystem";
 
 export default function Dashboard() {
   const [runs, setRuns] = useState(null);
   const [query, setQuery] = useState("");
+  const [openMenu, setOpenMenu] = useState(null);
+  const [deleting, setDeleting] = useState(null);
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -18,6 +23,14 @@ export default function Dashboard() {
     } catch (e) { toast.error(formatError(e)); }
   };
   useEffect(() => { load(); }, []);
+
+  useEffect(() => {
+    const close = (event) => {
+      if (!event.target.closest("[data-run-menu]")) setOpenMenu(null);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, []);
 
   useEffect(() => {
     const params = new URLSearchParams(location.search);
@@ -31,12 +44,30 @@ export default function Dashboard() {
   };
 
   const remove = async (id) => {
-    if (!window.confirm("Delete this allocation run? This action is audited.")) return;
+    const run = (runs || []).find((item) => item.id === id);
+    if (!window.confirm(`Permanently delete "${run?.name || "this allocation run"}" and all of its stored rows? This action cannot be undone and will be audited.`)) return;
+    setDeleting(id);
     try {
       await api.delete(`/allocations/${id}`);
       toast.success("Run deleted");
-      load();
-    } catch (e) { toast.error(formatError(e)); }
+      setRuns((current) => (current || []).filter((item) => item.id !== id));
+      setOpenMenu(null);
+    } catch (e) {
+      toast.error(formatError(e));
+    } finally {
+      setDeleting(null);
+    }
+  };
+
+  const exportRun = async (run, kind) => {
+    setOpenMenu(null);
+    try {
+      const safe = (run.name || "allocation").replace(/[^a-z0-9_-]+/gi, "-");
+      if (kind === "csv") await downloadAuthed(`/allocations/${run.id}/export`, `${safe}.csv`);
+      else await downloadAuthed(`/allocations/${run.id}/export-xlsx`, `${safe}.xlsx`);
+    } catch (e) {
+      toast.error(formatError(e));
+    }
   };
 
   const totals = (runs || []).reduce((acc, r) => {
@@ -120,7 +151,7 @@ export default function Dashboard() {
                 </td>
               </tr>
             )}
-            {filtered && filtered.map((r) => {
+            {filtered && filtered.map((r, index) => {
               const total = r.stats?.total_bank || 0;
               const matched = (r.stats?.fully_matched || 0) + (r.stats?.partially_matched || 0);
               const rate = total ? Math.round((matched / total) * 100) : 0;
@@ -139,10 +170,46 @@ export default function Dashboard() {
                       {rate}%
                     </span>
                   </td>
-                  <td className="text-right">
-                    <button onClick={() => remove(r.id)} className="inline-flex h-8 w-8 items-center justify-center rounded-[8px] text-[#0F172A]/50 hover:bg-[#0F172A]/5 hover:text-[#0F172A]" data-testid={`delete-run-${r.id}`} title="Run actions">
+                  <td className="relative text-right" data-run-menu>
+                    <button
+                      onClick={() => setOpenMenu((current) => current === r.id ? null : r.id)}
+                      className="inline-flex h-8 w-8 items-center justify-center rounded-[8px] text-[#0F172A]/50 hover:bg-[#0F172A]/5 hover:text-[#0F172A]"
+                      data-testid={`run-actions-${r.id}`}
+                      title="Run actions"
+                      aria-haspopup="menu"
+                      aria-expanded={openMenu === r.id}
+                    >
                       <MoreVertical className="h-4 w-4" />
                     </button>
+                    {openMenu === r.id && (
+                      <div
+                        className={`absolute right-3 z-30 w-48 overflow-hidden rounded-lg border border-slate-200 bg-white py-1 text-left shadow-xl ${
+                          index >= filtered.length - 2 ? "bottom-10" : "top-10"
+                        }`}
+                        role="menu"
+                        data-testid={`run-menu-${r.id}`}
+                      >
+                        <button onClick={() => navigate(`/allocations/${r.id}`)} className="flex w-full items-center gap-2 px-3 py-2 text-sm hover:bg-slate-50" role="menuitem">
+                          <Eye className="h-4 w-4" /> View details
+                        </button>
+                        <button onClick={() => exportRun(r, "csv")} className="flex w-full items-center gap-2 px-3 py-2 text-sm hover:bg-slate-50" role="menuitem">
+                          <Download className="h-4 w-4" /> Export CSV
+                        </button>
+                        <button onClick={() => exportRun(r, "xlsx")} className="flex w-full items-center gap-2 px-3 py-2 text-sm hover:bg-slate-50" role="menuitem">
+                          <FileSpreadsheet className="h-4 w-4" /> Export Excel
+                        </button>
+                        <div className="my-1 border-t border-slate-100" />
+                        <button
+                          onClick={() => remove(r.id)}
+                          disabled={deleting === r.id}
+                          className="flex w-full items-center gap-2 px-3 py-2 text-sm text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+                          role="menuitem"
+                          data-testid={`delete-run-${r.id}`}
+                        >
+                          <Trash2 className="h-4 w-4" /> {deleting === r.id ? "Deleting..." : "Delete run"}
+                        </button>
+                      </div>
+                    )}
                   </td>
                 </tr>
               );

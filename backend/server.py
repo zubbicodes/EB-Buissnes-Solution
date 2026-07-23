@@ -8,6 +8,7 @@ import os
 import re
 import csv
 import io
+import asyncio
 import uuid
 import logging
 import bcrypt
@@ -23,7 +24,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr
 from rapidfuzz import fuzz, process as rf_process, utils as rf_utils
 from collections import defaultdict
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token as google_id_token
 
@@ -539,17 +540,30 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
         })
 
     inv_by_norm = {}
+    inv_by_digits: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    inv_by_digit_suffix: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for inv in invoice_rows:
         if inv["number_norm"]:
             inv_by_norm.setdefault(inv["number_norm"], []).append(inv)
+            digits = re.sub(r"\D", "", inv["number_norm"])
+            if len(digits) >= 4:
+                inv_by_digits[digits].append(inv)
+                for suffix_len in range(4, len(digits) + 1):
+                    inv_by_digit_suffix[digits[-suffix_len:]].append(inv)
 
     # Inverted token index: distinctive debtor token -> list of invoice indices.
     # Used to pre-filter candidates for Pass 2 + Pass 2.5 (huge speedup on large invoice sets).
     token_index: Dict[str, List[int]] = defaultdict(list)
     debtor_tokens_cache: List[List[str]] = []
+    debtor_norm_cache: List[str] = []
+    debtor_norm_index: Dict[str, List[int]] = defaultdict(list)
     for idx, inv in enumerate(invoice_rows):
         toks = distinctive_tokens(inv["debtor"]) if inv["debtor"] else []
         debtor_tokens_cache.append(toks)
+        norm = debtor_norm(inv["debtor"]) if inv["debtor"] else ""
+        debtor_norm_cache.append(norm)
+        if norm:
+            debtor_norm_index[norm].append(idx)
         for t in toks:
             token_index[t].append(idx)
 
@@ -571,9 +585,9 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
             else:
                 digits = re.sub(r"\D", "", ref)
                 if len(digits) >= 4:
-                    for k, vs in inv_by_norm.items():
-                        if k.endswith(digits) or digits.endswith(re.sub(r"\D", "", k)):
-                            cands.extend(vs)
+                    cands.extend(inv_by_digit_suffix.get(digits, ()))
+                    for suffix_len in range(4, len(digits) + 1):
+                        cands.extend(inv_by_digits.get(digits[-suffix_len:], ()))
             for c in cands:
                 if c["id"] in seen_ids:
                     continue
@@ -631,9 +645,14 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
         compare_norm = debtor_norm(compare_text)
         if not compare_norm:
             continue
+        cand_idx_set = set()
+        for token in distinctive_tokens(compare_text):
+            cand_idx_set.update(token_index.get(token, ()))
         exact_candidates = [
-            inv for inv in invoice_rows
-            if inv["remaining"] > 0 and inv["debtor"] and debtor_norm(inv["debtor"]) and debtor_norm(inv["debtor"]) in compare_norm
+            invoice_rows[i] for i in cand_idx_set
+            if invoice_rows[i]["remaining"] > 0
+            and debtor_norm_cache[i]
+            and debtor_norm_cache[i] in compare_norm
         ]
         if not exact_candidates:
             continue
@@ -692,8 +711,8 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
             best_score, best_inv = scored[0]
             best_norm = debtor_norm(best_inv["debtor"])
             scored = [
-                (best_score, inv) for inv in invoice_rows
-                if inv["remaining"] > 0 and debtor_norm(inv.get("debtor", "")) == best_norm
+                (best_score, invoice_rows[i]) for i in debtor_norm_index.get(best_norm, ())
+                if invoice_rows[i]["remaining"] > 0
             ]
             scored.sort(key=lambda x: invoice_fifo_key(x[1]))
         for score, inv in scored:
@@ -1130,7 +1149,21 @@ async def delete_preset(preset_id: str, current=Depends(get_current_user)):
 async def validate(payload: ValidateIn, current=Depends(get_current_user)):
     bank_rows = parse_upload(payload.bank_csv, payload.bank_file)
     inv_rows = parse_upload(payload.invoice_csv, payload.invoice_file)
-    return validate_rows(bank_rows, inv_rows, payload.mapping)
+    result = validate_rows(bank_rows, inv_rows, payload.mapping)
+    await write_audit(
+        current["id"],
+        None,
+        "validate_upload",
+        {
+            "ok": result["ok"],
+            "bank_rows": result["bank_row_count"],
+            "invoice_rows": result["invoice_row_count"],
+            "errors": len(result["errors"]),
+            "warnings": len(result["warnings"]),
+        },
+        current["org_id"],
+    )
+    return result
 
 
 @api.post("/allocations/preview-headers")
@@ -1296,16 +1329,38 @@ async def rebuild_exceptions(run_id: str, user_id: str, org_id: str):
 async def _process_run_async(run_id: str, user_id: str, org_id: str, bank_raw: List[Dict[str, str]], inv_raw: List[Dict[str, str]], mapping_dict: Dict[str, Any]):
     """Background processor for large allocation runs."""
     try:
+        await db.allocation_runs.update_one(
+            {"id": run_id, "org_id": org_id},
+            {"$set": {"progress": 10, "progress_phase": "Preparing and matching rows"}},
+        )
         mapping = ColumnMapping(**mapping_dict)
-        bank_rows, invoice_rows, stats = run_matching(bank_raw, inv_raw, mapping)
+        # Matching is CPU-heavy. Run it off the asyncio event loop so users,
+        # audit, progress polling, and all other API endpoints remain responsive.
+        bank_rows, invoice_rows, stats = await asyncio.to_thread(
+            run_matching, bank_raw, inv_raw, mapping
+        )
+        await db.allocation_runs.update_one(
+            {"id": run_id, "org_id": org_id},
+            {"$set": {"progress": 60, "progress_phase": "Enriching match results"}},
+        )
         enrich_matches(bank_rows, invoice_rows)
+        await db.allocation_runs.update_one(
+            {"id": run_id, "org_id": org_id},
+            {"$set": {"progress": 75, "progress_phase": "Saving allocation results"}},
+        )
         await save_run_rows(run_id, user_id, org_id, bank_rows, invoice_rows)
+        await db.allocation_runs.update_one(
+            {"id": run_id, "org_id": org_id},
+            {"$set": {"progress": 90, "progress_phase": "Building exception report"}},
+        )
         stats["exceptions"] = await rebuild_exceptions(run_id, user_id, org_id)
         await db.allocation_runs.update_one(
             {"id": run_id, "org_id": org_id},
             {"$set": {
                 "stats": stats,
                 "status": "done",
+                "progress": 100,
+                "progress_phase": "Allocation complete",
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             }},
         )
@@ -1314,7 +1369,7 @@ async def _process_run_async(run_id: str, user_id: str, org_id: str, bank_raw: L
         logger.exception("Async run failed: %s", e)
         await db.allocation_runs.update_one(
             {"id": run_id, "org_id": org_id},
-            {"$set": {"status": "error", "error": str(e)}},
+            {"$set": {"status": "error", "error": str(e), "progress_phase": "Allocation failed"}},
         )
         await write_audit(user_id, run_id, "create_run_failed", {"error": str(e)}, org_id)
 
@@ -1347,6 +1402,8 @@ async def create_allocation(payload: AllocationCreate, background: BackgroundTas
         "created_at": datetime.now(timezone.utc).isoformat(),
         "mapping": payload.mapping.model_dump(),
         "status": "processing" if is_large else "done",
+        "progress": 5 if is_large else 100,
+        "progress_phase": "Queued for processing" if is_large else "Allocation complete",
     }
 
     if is_large:
@@ -1356,6 +1413,13 @@ async def create_allocation(payload: AllocationCreate, background: BackgroundTas
             "unmatched_invoices": 0, "overpaid": 0, "manual": 0, "exceptions": 0,
             "total_allocated": 0.0, "total_outstanding": 0.0,
         }})
+        await write_audit(
+            current["id"],
+            run_id,
+            "create_run_queued",
+            {"name": payload.name, "period": payload.period, "bank_rows": bank_row_count, "invoice_rows": invoice_row_count},
+            current["org_id"],
+        )
         background.add_task(_process_run_async, run_id, current["id"], current["org_id"], bank_raw, inv_raw, payload.mapping.model_dump())
         doc = await db.allocation_runs.find_one({"id": run_id, "org_id": current["org_id"]}, {"_id": 0})
         return doc
@@ -1379,7 +1443,7 @@ async def create_allocation(payload: AllocationCreate, background: BackgroundTas
 @api.get("/allocations")
 async def list_allocations(current=Depends(get_current_user)):
     runs = await db.allocation_runs.find(
-        {"org_id": current["org_id"]},
+        {"org_id": current["org_id"], "status": {"$ne": "archived"}},
         {"_id": 0, "bank_rows": 0, "invoice_rows": 0},
     ).sort("created_at", -1).to_list(500)
     return runs
@@ -1453,12 +1517,23 @@ async def delete_allocation(run_id: str, current=Depends(get_current_user)):
     run = await db.allocation_runs.find_one({"id": run_id, "org_id": current["org_id"]}, {"_id": 0, "name": 1, "created_at": 1})
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
-    await db.allocation_runs.update_one(
-        {"id": run_id, "org_id": current["org_id"]},
-        {"$set": {"status": "archived", "archived_at": datetime.now(timezone.utc).isoformat(), "archived_by": current["id"]}},
+    bank_result = await db.allocation_bank_rows.delete_many({"run_id": run_id, "org_id": current["org_id"]})
+    invoice_result = await db.allocation_invoice_rows.delete_many({"run_id": run_id, "org_id": current["org_id"]})
+    exception_result = await db.exceptions.delete_many({"run_id": run_id, "org_id": current["org_id"]})
+    await db.allocation_runs.delete_one({"id": run_id, "org_id": current["org_id"]})
+    await write_audit(
+        current["id"],
+        run_id,
+        "delete_run",
+        {
+            "name": run.get("name"),
+            "bank_rows_deleted": bank_result.deleted_count,
+            "invoice_rows_deleted": invoice_result.deleted_count,
+            "exceptions_deleted": exception_result.deleted_count,
+        },
+        current["org_id"],
     )
-    await write_audit(current["id"], run_id, "archive_run", {"name": run.get("name"), "retention": "24_months"}, current["org_id"])
-    return {"ok": True}
+    return {"ok": True, "deleted": True}
 
 
 @api.get("/allocations/{run_id}/export")

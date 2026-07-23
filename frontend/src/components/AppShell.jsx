@@ -1,10 +1,11 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { api } from "@/lib/api";
 import {
   LayoutDashboard, GitCompareArrows, Users, ScrollText,
   LogOut, PlusCircle, Search, AlertTriangle, ShieldCheck,
+  CheckCircle2, XCircle, Clock3, FileCheck2,
 } from "lucide-react";
 import { BrandMark } from "@/components/DesignSystem";
 import topbarMoon from "@/assets/moon.png";
@@ -27,6 +28,10 @@ export default function AppShell({ children }) {
   const location = useLocation();
   const [searchTerm, setSearchTerm] = useState("");
   const [notificationCount, setNotificationCount] = useState(0);
+  const [notifications, setNotifications] = useState([]);
+  const [notificationOpen, setNotificationOpen] = useState(false);
+  const [notificationLoading, setNotificationLoading] = useState(false);
+  const notificationRef = useRef(null);
   const hideTopbar = location.pathname === "/new" || location.pathname.startsWith("/allocations/") || location.pathname === "/debtors" || location.pathname === "/audit" || location.pathname === "/compare" || location.pathname === "/exceptions" || location.pathname === "/users";
   const compactLayout = location.pathname === "/new" || location.pathname.startsWith("/allocations/");
   const visibleNav = navItems.filter((item) => !item.adminOnly || user?.role === "admin");
@@ -47,28 +52,111 @@ export default function AppShell({ children }) {
     setSearchTerm(params.get("q") || "");
   }, [location.search]);
 
+  const notificationKey = `ebrr_notifications_seen_${user?.id || "anonymous"}`;
+
+  const loadNotifications = async () => {
+    if (!user) return;
+    setNotificationLoading(true);
+    try {
+      const [{ data: runs }, { data: audit }] = await Promise.all([
+        api.get("/allocations"),
+        api.get("/audit"),
+      ]);
+      const runById = Object.fromEntries((runs || []).map((run) => [run.id, run]));
+      const actionContent = {
+        validate_upload: ["Validation completed", FileCheck2, "/new"],
+        create_run_queued: ["Allocation queued", Clock3, null],
+        create_run: ["Allocation completed", CheckCircle2, null],
+        create_run_failed: ["Allocation failed", XCircle, null],
+        create_run_interrupted: ["Allocation interrupted", AlertTriangle, null],
+        delete_run: ["Allocation deleted", XCircle, "/audit"],
+        archive_run: ["Allocation archived", XCircle, "/audit"],
+        manual_link: ["Manual allocation saved", CheckCircle2, null],
+        manual_unlink: ["Manual allocation removed", AlertTriangle, null],
+        user_role_update: ["User role updated", ShieldCheck, "/users"],
+      };
+      const items = (audit?.logs || []).map((event) => {
+        const [title, Icon, defaultTarget] = actionContent[event.action] || ["Activity recorded", Clock3, "/audit"];
+        const run = event.run_id ? runById[event.run_id] : null;
+        const details = event.details || {};
+        let message = details.name || run?.name || event.action.replaceAll("_", " ");
+        if (event.action === "validate_upload") {
+          message = `${details.bank_rows || 0} bank rows and ${details.invoice_rows || 0} invoice rows checked`;
+        } else if (event.action === "create_run") {
+          message = `${run?.name || "Run"} finished with ${details.stats?.fully_matched || 0} confirmed matches`;
+        } else if (event.action === "create_run_queued") {
+          message = `${details.name || run?.name || "Run"} is ready for processing`;
+        }
+        return {
+          id: event.id,
+          title,
+          message,
+          createdAt: event.created_at,
+          target: event.run_id && event.action !== "delete_run" && event.action !== "archive_run"
+            ? `/allocations/${event.run_id}`
+            : defaultTarget || "/audit",
+          Icon,
+          tone: event.action.includes("failed") || event.action.includes("interrupted") ? "rose" : "emerald",
+        };
+      });
+      (runs || []).filter((run) => run.status === "processing").forEach((run) => {
+        items.push({
+          id: `processing-${run.id}`,
+          title: run.progress_phase || "Allocation processing",
+          message: `${run.name}: ${Math.round(run.progress || 5)}% complete`,
+          createdAt: run.created_at,
+          target: `/allocations/${run.id}`,
+          Icon: Clock3,
+          tone: "blue",
+        });
+      });
+      items.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+      const next = items.slice(0, 20);
+      setNotifications(next);
+      const seenAt = localStorage.getItem(notificationKey) || "";
+      setNotificationCount(next.filter((item) => !seenAt || new Date(item.createdAt) > new Date(seenAt)).length);
+    } catch {
+      setNotifications([]);
+      setNotificationCount(0);
+    } finally {
+      setNotificationLoading(false);
+    }
+  };
+
   useEffect(() => {
     if (!user) {
+      setNotifications([]);
       setNotificationCount(0);
-      return;
+      return undefined;
     }
+    loadNotifications();
+    const timer = setInterval(loadNotifications, 15000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id, location.pathname]);
 
-    let active = true;
-    api.get("/allocations")
-      .then(({ data }) => {
-        if (!active) return;
-        const count = (data || []).filter((run) => {
-          const stats = run.stats || {};
-          return (stats.partially_matched || 0) > 0 || (stats.unmatched_bank || 0) > 0;
-        }).length;
-        setNotificationCount(count);
-      })
-      .catch(() => {
-        if (active) setNotificationCount(0);
-      });
+  useEffect(() => {
+    const close = (event) => {
+      if (notificationRef.current && !notificationRef.current.contains(event.target)) setNotificationOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, []);
 
-    return () => { active = false; };
-  }, [user, location.pathname]);
+  const toggleNotifications = () => {
+    const nextOpen = !notificationOpen;
+    setNotificationOpen(nextOpen);
+    if (nextOpen) {
+      localStorage.setItem(notificationKey, new Date().toISOString());
+      setNotificationCount(0);
+      loadNotifications();
+    }
+  };
+
+  const openNotification = (item) => {
+    setNotificationOpen(false);
+    navigate(item.target);
+  };
 
   const submitSearch = (event) => {
     event.preventDefault();
@@ -190,14 +278,75 @@ export default function AppShell({ children }) {
                 <button className="hidden h-[25px] w-[25px] items-center justify-center md:flex" title="Theme">
                   <img src={topbarMoon} alt="" className="h-[25px] w-[25px]" />
                 </button>
-                <button className="relative hidden h-[25px] w-[25px] items-center justify-center md:flex" title="Notifications">
-                  <img src={topbarBell} alt="" className="h-[25px] w-[25px]" />
-                  {notificationCount > 0 && (
-                    <span className="eb-notification-badge" aria-label={`${notificationCount} notifications`}>
-                      {notificationCount > 99 ? "99+" : notificationCount}
-                    </span>
+                <div className="relative hidden md:block" ref={notificationRef}>
+                  <button
+                    onClick={toggleNotifications}
+                    className="relative flex h-[25px] w-[25px] items-center justify-center"
+                    title="Notifications"
+                    aria-label="Notifications"
+                    aria-haspopup="dialog"
+                    aria-expanded={notificationOpen}
+                    data-testid="notifications-button"
+                  >
+                    <img src={topbarBell} alt="" className="h-[25px] w-[25px]" />
+                    {notificationCount > 0 && (
+                      <span className="eb-notification-badge" aria-label={`${notificationCount} unread notifications`}>
+                        {notificationCount > 99 ? "99+" : notificationCount}
+                      </span>
+                    )}
+                  </button>
+                  {notificationOpen && (
+                    <div
+                      className="absolute right-0 top-10 z-50 w-[380px] overflow-hidden rounded-xl border border-slate-200 bg-white text-left shadow-2xl"
+                      role="dialog"
+                      aria-label="Notifications"
+                      data-testid="notifications-panel"
+                    >
+                      <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
+                        <div>
+                          <div className="font-display text-base font-semibold text-slate-950">Notifications</div>
+                          <div className="mt-0.5 text-xs text-slate-500">Validation and allocation activity</div>
+                        </div>
+                        <button onClick={() => navigate("/audit")} className="text-xs font-semibold text-emerald-700 hover:underline">
+                          View audit
+                        </button>
+                      </div>
+                      <div className="max-h-[420px] overflow-y-auto">
+                        {notificationLoading && notifications.length === 0 && (
+                          <div className="px-4 py-8 text-center text-sm text-slate-500">Loading notifications...</div>
+                        )}
+                        {!notificationLoading && notifications.length === 0 && (
+                          <div className="px-4 py-8 text-center text-sm text-slate-500">No notifications yet.</div>
+                        )}
+                        {notifications.map((item) => {
+                          const Icon = item.Icon;
+                          const iconTone = item.tone === "rose"
+                            ? "bg-rose-100 text-rose-700"
+                            : item.tone === "blue"
+                              ? "bg-blue-100 text-blue-700"
+                              : "bg-emerald-100 text-emerald-700";
+                          return (
+                            <button
+                              key={item.id}
+                              onClick={() => openNotification(item)}
+                              className="flex w-full gap-3 border-b border-slate-100 px-4 py-3 text-left hover:bg-slate-50"
+                              data-testid={`notification-${item.id}`}
+                            >
+                              <span className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${iconTone}`}>
+                                <Icon className="h-4 w-4" />
+                              </span>
+                              <span className="min-w-0 flex-1">
+                                <span className="block text-sm font-semibold text-slate-900">{item.title}</span>
+                                <span className="mt-0.5 block truncate text-xs text-slate-600">{item.message}</span>
+                                <span className="mt-1 block text-[11px] text-slate-400">{new Date(item.createdAt).toLocaleString("en-GB")}</span>
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
                   )}
-                </button>
+                </div>
                 <img src={topbarAvatar} alt="" className="eb-user-avatar" />
               </div>
             </div>
