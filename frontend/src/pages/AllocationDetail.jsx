@@ -6,7 +6,7 @@ import { ArrowLeft, Download, Link2, AlertTriangle, FileSpreadsheet, ChevronLeft
 
 const TABS = [
   { id: "full", label: "Confirmed" },
-  { id: "partial", label: "Suggested" },
+  { id: "suggested", label: "Suggested" },
   { id: "overpaid", label: "Overpaid" },
   { id: "unmatched_bank", label: "Unmatched Bank" },
   { id: "unmatched_invoice", label: "Unmatched Invoice" },
@@ -35,6 +35,7 @@ export default function AllocationDetail() {
   const [page, setPage] = useState(1);
   const [tabLoading, setTabLoading] = useState(false);
   const [review, setReview] = useState(null); // bank row being reviewed in the side-panel
+  const [reviewBusy, setReviewBusy] = useState(false);
 
   const loadHeader = useCallback(async () => {
     try {
@@ -167,6 +168,22 @@ export default function AllocationDetail() {
     toast.success("Link saved");
   };
 
+  const reviewSuggestion = async (action, bank) => {
+    if (reviewBusy) return;
+    setReviewBusy(true);
+    try {
+      await api.post(`/allocations/${id}/suggestions/${bank.id}/${action}`);
+      toast.success(action === "accept" ? "Suggestion accepted" : "Suggestion rejected");
+      setReview(null);
+      await loadHeader();
+      await loadTab(tab, page, search);
+    } catch (e) {
+      toast.error(formatError(e));
+    } finally {
+      setReviewBusy(false);
+    }
+  };
+
   return (
     <div className="eb-detail-page" data-testid="allocation-detail-page">
       <Link to="/dashboard" className="eb-detail-back" data-testid="back-to-dashboard">
@@ -210,7 +227,7 @@ export default function AllocationDetail() {
       <div className="eb-detail-stat-grid">
         <Stat icon={PoundSterling} label="Total Allocated" value={fmtGBP(run.stats.total_allocated)} tone="slate" testid="stat-total" />
         <Stat icon={CheckCircle2} label="Confirmed" value={run.stats.fully_matched} tone="slate" testid="stat-full" />
-        <Stat icon={AlertTriangle} label="Suggested (Review)" value={run.stats.partially_matched} tone="amber" testid="stat-partial" />
+        <Stat icon={AlertTriangle} label="Suggested (Review)" value={run.stats.suggested_matches ?? run.stats.partially_matched} tone="amber" testid="stat-partial" />
         <Stat icon={AlertTriangle} label="Overpaid" value={run.stats.overpaid || 0} tone="amber" testid="stat-overpaid" />
         <Stat icon={XCircle} label="Unmatched Bank" value={run.stats.unmatched_bank} tone="rose" testid="stat-unmatched-bank" />
         <Stat icon={FileText} label="Unmatched Invoices" value={run.stats.unmatched_invoices} tone="rose" testid="stat-unmatched-invoice" />
@@ -245,7 +262,7 @@ export default function AllocationDetail() {
         </div>
       )}
 
-      {(tab === "full" || tab === "partial" || tab === "overpaid") && (
+      {(tab === "full" || tab === "suggested" || tab === "overpaid") && (
         <BankTable rows={tabData.rows} showLink={false} onReview={setReview} />
       )}
       {tab === "unmatched_bank" && (
@@ -261,7 +278,13 @@ export default function AllocationDetail() {
       )}
 
       {review && (
-        <ReviewPanel bank={review} onClose={() => setReview(null)} />
+        <ReviewPanel
+          bank={review}
+          busy={reviewBusy}
+          onAccept={() => reviewSuggestion("accept", review)}
+          onReject={() => reviewSuggestion("reject", review)}
+          onClose={() => setReview(null)}
+        />
       )}
 
       {linkDialog && (
@@ -311,15 +334,18 @@ function Pagination({ page, total, pageSize, onChange }) {
 
 function BankTable({ rows, showLink, onLink, onReview }) {
   if (rows.length === 0) return <Empty label="No rows in this bucket." />;
-  // Explode: one display row per (bank, match) pair. Unmatched bank rows render once with no match info.
+  // Explode committed and provisional links without treating suggestions as allocations.
   const exploded = [];
   rows.forEach((b) => {
-    const matches = b.matches || [];
-    if (matches.length === 0) {
+    const entries = [
+      ...(b.matches || []).map((m) => ({ ...m, provisional: false })),
+      ...(b.suggestions || []).map((m) => ({ ...m, provisional: true })),
+    ];
+    if (entries.length === 0) {
       exploded.push({ b, m: null, isFirst: true, count: 1, idx: 0 });
     } else {
-      matches.forEach((m, idx) => {
-        exploded.push({ b, m, isFirst: idx === 0, count: matches.length, idx });
+      entries.forEach((m, idx) => {
+        exploded.push({ b, m, isFirst: idx === 0, count: entries.length, idx });
       });
     }
   });
@@ -335,7 +361,7 @@ function BankTable({ rows, showLink, onLink, onReview }) {
             <Th>Invoice #</Th>
             <Th>Debtor</Th>
             <Th right>Invoice amt</Th>
-            <Th right>Allocated</Th>
+            <Th right>Allocated / Proposed</Th>
             <Th right>Outstanding</Th>
             <Th>Match reason</Th>
             <Th>Conf.</Th>
@@ -370,6 +396,7 @@ function BankTable({ rows, showLink, onLink, onReview }) {
                     </td>
                     <td className="px-3 py-2 text-right tabular-nums text-emerald-700 font-semibold" data-testid={`match-${b.id}-${idx}-allocated`}>
                       {fmtGBP(m.amount)}
+                      {m.provisional && <div className="text-[10px] font-semibold text-amber-700">proposed</div>}
                     </td>
                     <td className="px-3 py-2 text-right tabular-nums text-xs" data-testid={`match-${b.id}-${idx}-outstanding`}>
                       {m.invoice_outstanding_before != null && m.invoice_outstanding_after != null ? (
@@ -449,10 +476,17 @@ function BankTable({ rows, showLink, onLink, onReview }) {
   );
 }
 
-function ReviewPanel({ bank, onClose }) {
+function ReviewPanel({ bank, onClose, onAccept, onReject, busy }) {
   if (!bank) return null;
   const matches = bank.matches || [];
+  const suggestions = bank.suggestions || [];
+  const displayLinks = [
+    ...matches.map((match) => ({ ...match, provisional: false })),
+    ...suggestions.map((match) => ({ ...match, provisional: true })),
+  ];
   const totalAllocated = matches.reduce((s, m) => s + m.amount, 0);
+  const totalSuggested = suggestions.reduce((s, m) => s + m.amount, 0);
+  const evidence = bank.evidence || {};
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4" data-testid="review-panel">
       <div className="bg-white rounded-md border border-slate-200 max-w-3xl w-full p-6 max-h-[90vh] overflow-y-auto">
@@ -467,9 +501,10 @@ function ReviewPanel({ bank, onClose }) {
           <button onClick={onClose} data-testid="review-close" className="text-slate-400 hover:text-slate-700 text-2xl leading-none">×</button>
         </div>
 
-        <div className="mt-6 grid sm:grid-cols-3 gap-3">
+        <div className="mt-6 grid sm:grid-cols-4 gap-3">
           <ReviewStat label="Bank amount" value={fmtGBP(bank.amount)} />
           <ReviewStat label="Total allocated" value={fmtGBP(totalAllocated)} tone="emerald" />
+          <ReviewStat label="Proposed" value={fmtGBP(totalSuggested)} tone={totalSuggested > 0 ? "amber" : "slate"} />
           <ReviewStat label="Remaining" value={fmtGBP(bank.remaining)} tone={bank.remaining > 0.005 ? "amber" : "slate"} />
         </div>
 
@@ -483,6 +518,10 @@ function ReviewPanel({ bank, onClose }) {
                 "bg-rose-100 text-rose-800 border-rose-200"
               }`}>{bank.status}{bank.confidence ? ` · ${bank.confidence}` : ""}</span>
             } />
+            <ReviewLine label="Decision" value={<span className="font-semibold">{(bank.decision || "auto_match").replace("_", " ")}</span>} />
+            <ReviewLine label="Debtor evidence" value={<span>{(evidence.debtor_match_type || "none").replaceAll("_", " ")}{evidence.debtor_score != null ? ` · ${evidence.debtor_score}%` : ""}</span>} />
+            <ReviewLine label="Candidate margin" value={<span>{evidence.candidate_margin != null ? `${evidence.candidate_margin} points` : "Not applicable"}</span>} />
+            <ReviewLine label="Amount evidence" value={<span>{(evidence.amount_evidence || "none").replaceAll("_", " ")}</span>} />
             <ReviewLine label="Extracted references" value={
               (bank.extracted_refs && bank.extracted_refs.length)
                 ? <span className="font-mono">{bank.extracted_refs.join(", ")}</span>
@@ -504,13 +543,13 @@ function ReviewPanel({ bank, onClose }) {
 
         <div className="mt-6">
           <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">
-            Matched invoices ({matches.length})
+            Invoices ({displayLinks.length})
           </div>
-          {matches.length === 0 ? (
+          {displayLinks.length === 0 ? (
             <Empty label="No invoices matched — use Link manually to assign one." />
           ) : (
             <div className="border border-slate-200 rounded-md divide-y divide-slate-100">
-              {matches.map((m, i) => (
+              {displayLinks.map((m, i) => (
                 <div key={i} className="p-3" data-testid={`review-match-${i}`}>
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
@@ -524,6 +563,7 @@ function ReviewPanel({ bank, onClose }) {
                     </div>
                     <div className="text-right shrink-0">
                       <div className="text-sm font-semibold tabular-nums text-emerald-700">{fmtGBP(m.amount)}</div>
+                      {m.provisional && <div className="text-[10px] font-semibold text-amber-700 mb-1">PROPOSED</div>}
                       <span className={`text-[10px] px-2 py-0.5 rounded-full border ${CONF_COLOUR[m.confidence] || "bg-slate-100 text-slate-600 border-slate-200"}`}>
                         {m.confidence}
                       </span>
@@ -548,6 +588,16 @@ function ReviewPanel({ bank, onClose }) {
             </div>
           )}
         </div>
+        {suggestions.length > 0 && (
+          <div className="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end" data-testid="suggestion-actions">
+            <button onClick={onReject} disabled={busy} className="eb-button-secondary disabled:opacity-50" data-testid="reject-suggestion">
+              {busy ? "Saving…" : "Reject suggestion"}
+            </button>
+            <button onClick={onAccept} disabled={busy} className="eb-button disabled:opacity-50" data-testid="accept-suggestion">
+              {busy ? "Saving…" : "Accept suggestion"}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

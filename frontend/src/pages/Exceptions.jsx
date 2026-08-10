@@ -13,6 +13,7 @@ const TYPES = [
   ["duplicate_invoice", "Duplicate invoices"],
   ["underpayment", "Underpayments"],
   ["overpayment", "Overpayments"],
+  ["suggested_allocation", "Suggested allocations"],
   ["low_confidence", "Low confidence"],
 ];
 

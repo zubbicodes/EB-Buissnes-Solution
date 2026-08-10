@@ -425,6 +425,20 @@ CORP_SUFFIXES = {
 STOP_TOKENS = {"the", "and", "of", "for", "to", "from", "payment", "transfer",
                "bacs", "chq", "ref", "inv", "invoice", "kref", "receipt", "deposit"}
 
+AUTO_MATCH_THRESHOLD = 95.0
+SUGGEST_MATCH_THRESHOLD = 85.0
+MIN_CANDIDATE_MARGIN = 10.0
+
+# Industry words are useful supporting evidence but are unsafe as the only
+# connection between a receipt and a debtor (for example, two unrelated
+# construction companies). They are deliberately excluded from fuzzy gating.
+GENERIC_NAME_TOKENS = {
+    "construction", "constructions", "developments", "development", "furniture",
+    "furnishings", "waste", "recycling", "southern", "services", "service",
+    "engineering", "group", "trading", "retail", "current",
+}
+NAME_QUALIFIERS = {"min", "ais", "a", "i", "s"}
+
 
 def distinctive_tokens(s: str) -> List[str]:
     """Tokens of a debtor name that are useful for substring matching: >=4 chars, not corp suffix, not stop word."""
@@ -459,6 +473,152 @@ def debtor_norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", strip_corp_suffix(s or "").lower())
 
 
+def debtor_sources(bank: Dict[str, Any]) -> List[str]:
+    """Return human-name-like fragments without treating the full bank narrative as one name."""
+    values: List[str] = []
+    for raw in (bank.get("payer") or "", bank.get("reference") or ""):
+        if not raw:
+            continue
+        values.append(raw)
+        values.extend(re.split(r"/?\s*(?:EREF|KREF|REMI)\s*/?", raw, flags=re.IGNORECASE))
+    clean = []
+    seen = set()
+    for value in values:
+        value = value.strip(" ./|:-")
+        if not value or not re.search(r"[A-Za-z]", value):
+            continue
+        key = value.lower()
+        if key not in seen:
+            seen.add(key)
+            clean.append(value)
+    return clean
+
+
+def name_tokens(value: str, *, significant_only: bool = False) -> List[str]:
+    tokens = [t.lower() for t in re.findall(r"[A-Za-z0-9]+", strip_corp_suffix(value or ""))]
+    tokens = [t for t in tokens if t not in STOP_TOKENS and t not in NAME_QUALIFIERS]
+    if significant_only:
+        tokens = [t for t in tokens if t not in GENERIC_NAME_TOKENS and len(t) >= 3]
+    return tokens
+
+
+def _token_prefix_match(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    shorter, longer = (left, right) if len(left) <= len(right) else (right, left)
+    return len(shorter) >= 3 and longer.startswith(shorter)
+
+
+def ordered_prefix_name_match(source: str, debtor: str) -> bool:
+    """Conservative match for truncated bank fields such as KAMM CIVIL ENGINEE."""
+    source_tokens = name_tokens(source)
+    debtor_tokens = name_tokens(debtor)
+    if not source_tokens or not debtor_tokens:
+        return False
+    pos = 0
+    matched = []
+    for debtor_token in debtor_tokens:
+        found = False
+        while pos < len(source_tokens):
+            source_token = source_tokens[pos]
+            pos += 1
+            if _token_prefix_match(source_token, debtor_token):
+                matched.append(debtor_token)
+                found = True
+                break
+        if not found:
+            return False
+    significant = [t for t in matched if t not in GENERIC_NAME_TOKENS]
+    return len(matched) >= 2 and bool(significant)
+
+
+def fuzzy_overlap_allowed(source: str, debtor: str) -> bool:
+    source_tokens = name_tokens(source)
+    debtor_tokens = name_tokens(debtor)
+    matched = [
+        debtor_token for debtor_token in debtor_tokens
+        if any(_token_prefix_match(source_token, debtor_token) for source_token in source_tokens)
+    ]
+    significant = [token for token in matched if token not in GENERIC_NAME_TOKENS and len(token) >= 3]
+    if len(matched) >= 2 and significant:
+        return True
+    source_significant = name_tokens(source, significant_only=True)
+    debtor_significant = name_tokens(debtor, significant_only=True)
+    return bool(
+        len(significant) == 1
+        and len(significant[0]) >= 6
+        and source_significant
+        and debtor_significant
+        and _token_prefix_match(source_significant[0], significant[0])
+        and _token_prefix_match(debtor_significant[0], significant[0])
+    )
+
+
+def fifo_plan(amount: float, invoices: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Plan allocations without mutating invoice or bank balances."""
+    remaining = round(max(float(amount or 0), 0), 2)
+    links = []
+    exact_whole_invoices = True
+    for inv in sorted((i for i in invoices if i.get("remaining", 0) > 0.005), key=invoice_fifo_key):
+        if remaining <= 0.005:
+            break
+        before = round(float(inv["remaining"]), 2)
+        allocation = round(min(remaining, before), 2)
+        if allocation <= 0:
+            continue
+        if abs(allocation - before) > 0.005:
+            exact_whole_invoices = False
+        links.append({"invoice": inv, "amount": allocation, "before": before, "after": round(before - allocation, 2)})
+        remaining = round(remaining - allocation, 2)
+    return {
+        "links": links,
+        "remaining": remaining,
+        "fully_consumed": remaining <= 0.005,
+        "exact_whole_invoices": bool(links) and exact_whole_invoices and remaining <= 0.005,
+    }
+
+
+def evidence_payload(**overrides) -> Dict[str, Any]:
+    payload = {
+        "reference_strength": "none",
+        "debtor_match_type": "none",
+        "debtor_score": None,
+        "runner_up_score": None,
+        "candidate_margin": None,
+        "amount_evidence": "none",
+        "ambiguous": False,
+        "decision_reason": "",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def proposal_links(bank: Dict[str, Any], plan: Dict[str, Any], method: str, confidence: str,
+                   reason: str, score: Optional[float] = None, ambiguous: bool = False) -> List[Dict[str, Any]]:
+    links = []
+    for item in plan["links"]:
+        inv = item["invoice"]
+        link = {
+            "bank_id": bank["id"], "invoice_id": inv["id"], "amount": item["amount"],
+            "method": method, "confidence": confidence, "reason": reason,
+            "invoice_number": inv.get("number"), "invoice_debtor": inv.get("debtor"),
+            "invoice_amount": inv.get("amount"),
+            "invoice_outstanding_before": item["before"],
+            "invoice_outstanding_after": item["after"],
+            "ambiguous": ambiguous, "provisional": True,
+        }
+        if score is not None:
+            link["score"] = round(score, 1)
+        links.append(link)
+    return links
+
+
+def commit_plan(bank: Dict[str, Any], plan: Dict[str, Any], method: str, confidence: str,
+                reason: str, score: Optional[float] = None, ambiguous: bool = False):
+    for item in plan["links"]:
+        allocate_link(bank, item["invoice"], method, confidence, reason, score, ambiguous)
+
+
 def allocate_link(b: Dict[str, Any], inv: Dict[str, Any], method: str, confidence: str,
                   reason: str, score: Optional[float] = None, ambiguous: bool = False,
                   ref_kind: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -491,7 +651,7 @@ def allocate_link(b: Dict[str, Any], inv: Dict[str, Any], method: str, confidenc
     return link
 
 
-def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
+def _run_matching_legacy(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
     # Build normalized rows
     bank_rows = []
     for i, r in enumerate(bank_rows_raw):
@@ -897,6 +1057,323 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
     return bank_rows, invoice_rows, stats
 
 
+# Conservative matcher v2. Kept separate from the legacy implementation above
+# so historical stored runs remain readable while every newly created run uses
+# this deterministic-first decision model.
+def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
+    bank_rows = []
+    for i, row in enumerate(bank_rows_raw):
+        amount = to_float(row.get(mapping.bank_amount or "", "")) or 0.0
+        bank_rows.append({
+            "id": str(uuid.uuid4()), "idx": i, "amount": round(amount, 2),
+            "remaining": round(amount, 2),
+            "reference": row.get(mapping.bank_reference or "", ""),
+            "payer": row.get(mapping.bank_payer or "", "") if mapping.bank_payer else "",
+            "date": parse_date_safe(row.get(mapping.bank_date or "", "")) if mapping.bank_date else None,
+            "matches": [], "suggestions": [], "status": "unmatched", "decision": "no_match",
+            "confidence": None, "confidence_score": None, "extracted_refs": [],
+            "best_debtor_score": None, "overpaid_amount": 0.0, "evidence": evidence_payload(),
+        })
+
+    invoice_rows = []
+    for i, row in enumerate(invoice_rows_raw):
+        amount = to_float(row.get(mapping.invoice_amount or "", "")) or 0.0
+        outstanding = to_float(row.get(mapping.invoice_outstanding or "", "")) if mapping.invoice_outstanding else None
+        if outstanding is None:
+            outstanding = amount
+        number = row.get(mapping.invoice_number or "", "")
+        invoice_rows.append({
+            "id": str(uuid.uuid4()), "idx": i, "number": number,
+            "number_norm": normalize_num(number),
+            "debtor": row.get(mapping.invoice_debtor or "", ""),
+            "amount": round(amount, 2), "outstanding": round(outstanding, 2),
+            "remaining": round(outstanding, 2),
+            "date": parse_date_safe(row.get(mapping.invoice_date or "", "")) if mapping.invoice_date else None,
+            "matches": [], "status": "unmatched",
+        })
+
+    inv_by_norm: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    inv_by_digit_suffix: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    debtor_groups: Dict[str, Dict[str, Any]] = {}
+    for invoice in invoice_rows:
+        if invoice["number_norm"]:
+            inv_by_norm[invoice["number_norm"]].append(invoice)
+            digits = re.sub(r"\D", "", invoice["number_norm"])
+            for suffix_len in range(4, len(digits) + 1):
+                inv_by_digit_suffix[digits[-suffix_len:]].append(invoice)
+        norm = debtor_norm(invoice.get("debtor") or "")
+        if norm:
+            group = debtor_groups.setdefault(norm, {"norm": norm, "label": invoice["debtor"], "invoices": []})
+            group["invoices"].append(invoice)
+
+    group_token_index: Dict[str, set] = defaultdict(set)
+    for norm, group in debtor_groups.items():
+        for token in name_tokens(group["label"]):
+            if len(token) >= 3:
+                group_token_index[token].add(norm)
+    indexed_group_tokens = tuple(group_token_index)
+    prefix_lookup_cache: Dict[str, set] = {}
+    fuzzy_score_cache: Dict[tuple, float] = {}
+
+    def candidate_groups_for_sources(sources):
+        norms = set()
+        for source in sources:
+            for token in name_tokens(source):
+                if len(token) < 3:
+                    continue
+                if token not in prefix_lookup_cache:
+                    related = set(group_token_index.get(token, ()))
+                    for indexed_token in indexed_group_tokens:
+                        if indexed_token != token and _token_prefix_match(token, indexed_token):
+                            related.update(group_token_index[indexed_token])
+                    prefix_lookup_cache[token] = related
+                norms.update(prefix_lookup_cache[token])
+        return [debtor_groups[norm] for norm in norms]
+
+    def set_no_match(bank, reason, evidence=None):
+        bank.update({"status": "unmatched", "decision": "no_match", "confidence": None, "reason": reason})
+        if evidence is not None:
+            bank["evidence"] = evidence
+
+    def describe_amount(plan, open_count):
+        if plan["exact_whole_invoices"]:
+            return "exact_invoice_set"
+        if open_count == 1 and plan["fully_consumed"]:
+            return "single_outstanding_invoice"
+        if plan["fully_consumed"]:
+            return "fifo"
+        return "insufficient_outstanding"
+
+    for bank in bank_rows:
+        payer_refs = extract_refs(bank.get("payer") or "")
+        reference_refs = extract_refs(bank.get("reference") or "")
+        # Some bank exports put their own transaction ID in the reference column
+        # and the remittance narrative in the payer field. Prefer narrative refs
+        # when present so an internal C3/... ID cannot masquerade as an invoice.
+        refs = sorted(set(payer_refs or reference_refs))
+        bank["extracted_refs"] = refs
+        reference_hits = []
+        ambiguous_reference = False
+        seen_invoice_ids = set()
+        for ref in refs:
+            candidates = list(inv_by_norm.get(ref, ()))
+            ref_kind = "exact"
+            if not candidates:
+                digits = re.sub(r"\D", "", ref)
+                candidates = list(inv_by_digit_suffix.get(digits, ())) if len(digits) >= 4 else []
+                ref_kind = "suffix"
+            unique_candidates = {candidate["id"]: candidate for candidate in candidates}
+            if len(unique_candidates) > 1:
+                ambiguous_reference = True
+                continue
+            if len(unique_candidates) == 1:
+                invoice = next(iter(unique_candidates.values()))
+                if invoice["id"] not in seen_invoice_ids:
+                    seen_invoice_ids.add(invoice["id"])
+                    reference_hits.append((invoice, ref_kind))
+
+        if reference_hits:
+            strengths = []
+            hit_debtors = set()
+            for invoice, ref_kind in sorted(reference_hits, key=lambda item: invoice_fifo_key(item[0])):
+                hit_debtors.add(debtor_norm(invoice.get("debtor") or ""))
+                strengths.append(ref_kind)
+                allocate_link(
+                    bank, invoice, "reference", "high",
+                    f"{'Exact' if ref_kind == 'exact' else 'Unique suffix'} invoice reference detected ('{invoice['number']}')",
+                    ambiguous=ambiguous_reference, ref_kind="exact" if ref_kind == "exact" else "partial",
+                )
+            strength = "exact" if strengths and all(value == "exact" for value in strengths) else "unique_suffix"
+            bank["confidence"] = "high"
+            bank["confidence_score"] = 100.0 if strength == "exact" else 98.0
+            evidence = evidence_payload(
+                reference_strength=strength, debtor_match_type="reference_identified",
+                ambiguous=ambiguous_reference,
+            )
+            if bank["matches"] and bank["remaining"] > 0.005 and len(hit_debtors) == 1:
+                group = debtor_groups.get(next(iter(hit_debtors)))
+                open_invoices = [item for item in (group or {}).get("invoices", []) if item["remaining"] > 0.005]
+                plan = fifo_plan(bank["remaining"], open_invoices)
+                if plan["links"]:
+                    reason = f"Invoice reference identified {group['label']}; remaining amount proposed FIFO for the same debtor"
+                    bank["suggestions"] = proposal_links(bank, plan, "reference_remainder", "medium", reason)
+                    bank.update({"status": "partial", "decision": "suggest", "reason": reason})
+                    evidence["amount_evidence"] = describe_amount(plan, len(open_invoices))
+                    evidence["decision_reason"] = "Referenced invoice committed; same-debtor remainder requires confirmation"
+                else:
+                    bank["overpaid_amount"] = bank["remaining"]
+                    bank.update({
+                        "status": "overpaid", "decision": "auto_match",
+                        "reason": f"Invoice reference matched; {fmt_money(bank['remaining'])} has no available same-debtor balance",
+                    })
+                    evidence["amount_evidence"] = "insufficient_outstanding"
+                    evidence["decision_reason"] = bank["reason"]
+            elif bank["matches"]:
+                has_remainder = bank["remaining"] > 0.005
+                if has_remainder:
+                    bank["overpaid_amount"] = bank["remaining"]
+                bank.update({
+                    "status": "overpaid" if has_remainder else "full",
+                    "decision": "auto_match",
+                    "reason": "Invoice reference matched before debtor-name evaluation",
+                })
+                evidence["amount_evidence"] = "exact_invoice_set" if bank["remaining"] <= 0.005 else "partial_reference"
+                evidence["decision_reason"] = bank["reason"]
+            else:
+                set_no_match(bank, "Invoice reference identified, but the invoice has no available balance", evidence)
+                evidence["decision_reason"] = bank["reason"]
+            bank["evidence"] = evidence
+            continue
+
+        sources = debtor_sources(bank)
+        candidate_groups = candidate_groups_for_sources(sources)
+        exact_groups = [
+            group for group in candidate_groups
+            if group["norm"] and any(group["norm"] in debtor_norm(source) for source in sources)
+        ]
+        selected_group = None
+        match_type = None
+        deterministic_score = None
+        if exact_groups:
+            exact_groups.sort(key=lambda group: len(group["norm"]), reverse=True)
+            if len(exact_groups) == 1 or len(exact_groups[0]["norm"]) > len(exact_groups[1]["norm"]):
+                selected_group, match_type, deterministic_score = exact_groups[0], "normalized_exact", 97.0
+        if selected_group is None:
+            prefix_groups = [
+                group for group in candidate_groups
+                if any(ordered_prefix_name_match(source, group["label"]) for source in sources)
+            ]
+            if len(prefix_groups) == 1:
+                selected_group, match_type, deterministic_score = prefix_groups[0], "ordered_prefix", 95.0
+
+        if selected_group is not None:
+            open_invoices = [item for item in selected_group["invoices"] if item["remaining"] > 0.005]
+            plan = fifo_plan(bank["remaining"], open_invoices)
+            evidence = evidence_payload(
+                debtor_match_type=match_type, debtor_score=deterministic_score,
+                candidate_margin=100.0, amount_evidence=describe_amount(plan, len(open_invoices)),
+            )
+            bank["best_debtor_score"] = deterministic_score
+            bank["confidence_score"] = deterministic_score
+            if not plan["links"]:
+                reason = f"Debtor identified as {selected_group['label']}, but no open invoice balance is available"
+                evidence["decision_reason"] = reason
+                set_no_match(bank, reason, evidence)
+                continue
+            reason = (
+                f"{'Normalized exact' if match_type == 'normalized_exact' else 'Conservative truncated-name'} "
+                f"debtor match for {selected_group['label']}; allocated FIFO"
+            )
+            commit_plan(
+                bank, plan, "debtor_exact" if match_type == "normalized_exact" else "debtor_prefix",
+                "high", reason, deterministic_score,
+            )
+            bank.update({"confidence": "high", "decision": "auto_match"})
+            if bank["remaining"] <= 0.005:
+                bank.update({"status": "full", "reason": reason})
+            else:
+                bank["overpaid_amount"] = bank["remaining"]
+                bank.update({"status": "overpaid", "reason": f"{reason}; {fmt_money(bank['remaining'])} remains unallocated"})
+            evidence["decision_reason"] = bank["reason"]
+            bank["evidence"] = evidence
+            continue
+
+        scored_groups = []
+        for group in candidate_groups:
+            eligible_sources = [source for source in sources if fuzzy_overlap_allowed(source, group["label"])]
+            if not eligible_sources:
+                continue
+            scores = []
+            for source in eligible_sources:
+                cache_key = (source.lower(), group["norm"])
+                if cache_key not in fuzzy_score_cache:
+                    fuzzy_score_cache[cache_key] = float(fuzz.WRatio(
+                        strip_corp_suffix(source), strip_corp_suffix(group["label"]),
+                        processor=rf_utils.default_process,
+                    ))
+                scores.append(fuzzy_score_cache[cache_key])
+            score = max(scores)
+            scored_groups.append((float(score), group))
+        scored_groups.sort(key=lambda item: (-item[0], item[1]["label"].lower()))
+        if not scored_groups:
+            set_no_match(bank, "No invoice reference or credible debtor-name evidence found")
+            continue
+        best_score, best_group = scored_groups[0]
+        runner_up = scored_groups[1][0] if len(scored_groups) > 1 else None
+        margin = round(best_score - runner_up, 1) if runner_up is not None else 100.0
+        bank["best_debtor_score"] = round(best_score, 1)
+        evidence = evidence_payload(
+            debtor_match_type="fuzzy", debtor_score=round(best_score, 1),
+            runner_up_score=round(runner_up, 1) if runner_up is not None else None,
+            candidate_margin=margin, ambiguous=margin < MIN_CANDIDATE_MARGIN,
+        )
+        if best_score < SUGGEST_MATCH_THRESHOLD:
+            reason = f"Best debtor candidate scored {best_score:.1f}%, below the {SUGGEST_MATCH_THRESHOLD:.0f}% suggestion threshold"
+            evidence["decision_reason"] = reason
+            set_no_match(bank, reason, evidence)
+            continue
+        open_invoices = [item for item in best_group["invoices"] if item["remaining"] > 0.005]
+        plan = fifo_plan(bank["remaining"], open_invoices)
+        evidence["amount_evidence"] = describe_amount(plan, len(open_invoices))
+        if not plan["links"]:
+            reason = f"Debtor candidate {best_group['label']} identified, but no open invoice balance is available"
+            evidence["decision_reason"] = reason
+            set_no_match(bank, reason, evidence)
+            continue
+        can_auto = (
+            best_score >= AUTO_MATCH_THRESHOLD
+            and margin >= MIN_CANDIDATE_MARGIN
+            and plan["exact_whole_invoices"]
+        )
+        reason = (
+            f"Unique debtor candidate {best_group['label']} at {best_score:.1f}% "
+            f"with {margin:.1f}-point margin and {evidence['amount_evidence'].replace('_', ' ')}"
+        )
+        if can_auto:
+            commit_plan(bank, plan, "debtor_name", "high", reason, best_score)
+            bank.update({
+                "status": "full", "decision": "auto_match", "confidence": "high",
+                "confidence_score": round(best_score, 1), "reason": reason,
+            })
+            evidence["decision_reason"] = "Fuzzy auto-match passed score, uniqueness, margin, and exact-amount safeguards"
+        else:
+            ambiguous = margin < MIN_CANDIDATE_MARGIN
+            reason = (
+                f"Suggested debtor {best_group['label']} at {best_score:.1f}%"
+                + (f"; runner-up margin {margin:.1f} points" if runner_up is not None else "; unique candidate")
+                + "; confirmation required"
+            )
+            bank["suggestions"] = proposal_links(bank, plan, "debtor_name", "medium", reason, best_score, ambiguous)
+            bank.update({
+                "status": "partial", "decision": "suggest", "confidence": "medium",
+                "confidence_score": round(best_score, 1), "reason": reason,
+            })
+            evidence["decision_reason"] = "Candidate did not satisfy every automatic-allocation safeguard"
+        bank["evidence"] = evidence
+
+    for invoice in invoice_rows:
+        if not invoice["matches"]:
+            invoice["status"] = "unmatched"
+        elif invoice["remaining"] <= 0.005:
+            invoice["status"] = "full"
+        else:
+            invoice["status"] = "partial"
+
+    stats = {
+        "total_bank": len(bank_rows), "total_invoices": len(invoice_rows),
+        "fully_matched": sum(1 for bank in bank_rows if bank["status"] == "full"),
+        "partially_matched": sum(1 for bank in bank_rows if bank["status"] == "partial"),
+        "suggested_matches": sum(1 for bank in bank_rows if bank.get("decision") == "suggest"),
+        "overpaid": sum(1 for bank in bank_rows if bank["status"] == "overpaid"),
+        "manual": sum(1 for bank in bank_rows if bank.get("decision") == "manual"),
+        "unmatched_bank": sum(1 for bank in bank_rows if bank["status"] == "unmatched"),
+        "unmatched_invoices": sum(1 for invoice in invoice_rows if invoice["status"] == "unmatched"),
+        "total_allocated": round(sum(match["amount"] for bank in bank_rows for match in bank["matches"]), 2),
+        "total_outstanding": round(sum(invoice["remaining"] for invoice in invoice_rows), 2),
+    }
+    return bank_rows, invoice_rows, stats
+
+
 # ----- App -----
 app = FastAPI()
 api = APIRouter(prefix="/api")
@@ -1234,7 +1711,7 @@ def enrich_matches(bank_rows: List[Dict[str, Any]], invoice_rows: List[Dict[str,
     """Denormalise invoice_number / invoice_debtor into each match for self-contained display + paginated reads."""
     inv_by_id = {inv["id"]: inv for inv in invoice_rows}
     for b in bank_rows:
-        for m in b.get("matches", []):
+        for m in [*b.get("matches", []), *b.get("suggestions", [])]:
             inv = inv_by_id.get(m.get("invoice_id"))
             if inv:
                 m["invoice_number"] = inv.get("number")
@@ -1264,7 +1741,14 @@ async def rebuild_exceptions(run_id: str, user_id: str, org_id: str):
                 "debtor": b.get("payer"), "reference": b.get("reference"), "amount": b.get("amount"),
                 "confidence": b.get("confidence"), "notes": "", "created_at": now,
             })
-        if b.get("status") == "partial":
+        if b.get("decision") == "suggest":
+            docs.append({
+                "id": str(uuid.uuid4()), "org_id": org_id, "user_id": user_id, "run_id": run_id,
+                "type": "suggested_allocation", "status": "open", "bank_row_id": b["id"],
+                "debtor": b.get("payer"), "reference": b.get("reference"), "amount": b.get("amount"),
+                "confidence": b.get("confidence"), "notes": "", "created_at": now,
+            })
+        elif b.get("status") == "partial":
             docs.append({
                 "id": str(uuid.uuid4()), "org_id": org_id, "user_id": user_id, "run_id": run_id,
                 "type": "underpayment", "status": "open", "bank_row_id": b["id"],
@@ -1409,7 +1893,7 @@ async def create_allocation(payload: AllocationCreate, background: BackgroundTas
     if is_large:
         await db.allocation_runs.insert_one({**base_doc, "stats": {
             "total_bank": bank_row_count, "total_invoices": invoice_row_count,
-            "fully_matched": 0, "partially_matched": 0, "unmatched_bank": 0,
+            "fully_matched": 0, "partially_matched": 0, "suggested_matches": 0, "unmatched_bank": 0,
             "unmatched_invoices": 0, "overpaid": 0, "manual": 0, "exceptions": 0,
             "total_allocated": 0.0, "total_outstanding": 0.0,
         }})
@@ -1459,6 +1943,10 @@ async def get_allocation(run_id: str, current=Depends(get_current_user)):
     )
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
+    stats = run.get("stats") or {}
+    if "suggested_matches" not in stats:
+        stats["suggested_matches"] = stats.get("partially_matched", 0)
+        run["stats"] = stats
     return run
 
 
@@ -1478,17 +1966,31 @@ async def get_allocation_rows(
     page_size = max(1, min(500, page_size))
     skip = (page - 1) * page_size
 
-    if bucket in ("full", "partial", "overpaid", "unmatched_bank"):
+    if bucket in ("full", "partial", "suggested", "overpaid", "unmatched_bank"):
         status_map = {"full": "full", "partial": "partial", "overpaid": "overpaid", "unmatched_bank": "unmatched"}
-        q: Dict[str, Any] = {"run_id": run_id, "org_id": current["org_id"], "status": status_map[bucket]}
+        q: Dict[str, Any] = {"run_id": run_id, "org_id": current["org_id"]}
+        if bucket == "suggested":
+            q["$or"] = [
+                {"decision": "suggest"},
+                {"decision": {"$exists": False}, "status": "partial"},
+            ]
+        else:
+            q["status"] = status_map[bucket]
         if search:
             esc = re.escape(search)
-            q["$or"] = [
+            search_terms = [
                 {"reference": {"$regex": esc, "$options": "i"}},
                 {"payer": {"$regex": esc, "$options": "i"}},
                 {"matches.invoice_number": {"$regex": esc, "$options": "i"}},
                 {"matches.invoice_debtor": {"$regex": esc, "$options": "i"}},
+                {"suggestions.invoice_number": {"$regex": esc, "$options": "i"}},
+                {"suggestions.invoice_debtor": {"$regex": esc, "$options": "i"}},
             ]
+            if "$or" in q:
+                decision_terms = q.pop("$or")
+                q["$and"] = [{"$or": decision_terms}, {"$or": search_terms}]
+            else:
+                q["$or"] = search_terms
         total = await db.allocation_bank_rows.count_documents(q)
         rows = await db.allocation_bank_rows.find(
             q, {"_id": 0, "run_id": 0, "user_id": 0, "org_id": 0}
@@ -1508,6 +2010,16 @@ async def get_allocation_rows(
     else:
         raise HTTPException(status_code=400, detail=f"Unknown bucket: {bucket}")
 
+    if bucket != "unmatched_invoice":
+        for row in rows:
+            if not row.get("decision"):
+                row["decision"] = (
+                    "suggest" if row.get("status") == "partial"
+                    else "no_match" if row.get("status") == "unmatched"
+                    else "manual" if row.get("status") == "manual"
+                    else "auto_match"
+                )
+            row.setdefault("suggestions", [])
     return {"rows": rows, "page": page, "page_size": page_size, "total": total, "bucket": bucket}
 
 
@@ -1546,7 +2058,9 @@ async def export_allocation(run_id: str, current=Depends(get_current_user)):
         out = io.StringIO()
         writer = csv.writer(out)
         writer.writerow(["Bank Date", "Bank Reference", "Bank Payer", "Bank Amount (£)",
-                         "Status", "Confidence", "Why matched?", "Matched Invoices", "Allocated (£)", "Bank Remaining (£)"])
+                         "Status", "Decision", "Confidence", "Why matched?", "Evidence",
+                         "Matched Invoices", "Allocated (£)", "Suggested Invoices",
+                         "Suggested Amount (£)", "Bank Remaining (£)"])
         yield out.getvalue()
         async for b in db.allocation_bank_rows.find(
             {"run_id": run_id, "org_id": current["org_id"]}, {"_id": 0}
@@ -1555,16 +2069,27 @@ async def export_allocation(run_id: str, current=Depends(get_current_user)):
             writer = csv.writer(out)
             nums = ", ".join((m.get("invoice_number") or "?") for m in b.get("matches", []))
             allocated = round(sum(m["amount"] for m in b.get("matches", [])), 2)
+            suggested_nums = ", ".join((m.get("invoice_number") or "?") for m in b.get("suggestions", []))
+            suggested_amount = round(sum(m["amount"] for m in b.get("suggestions", [])), 2)
+            evidence = b.get("evidence") or {}
+            evidence_text = "; ".join(
+                f"{key.replace('_', ' ')}: {value}"
+                for key, value in evidence.items() if value not in (None, "", False, "none")
+            )
             writer.writerow([
                 b.get("date") or "",
                 b.get("reference") or "",
                 b.get("payer") or "",
                 f"{b['amount']:.2f}",
                 b["status"],
+                b.get("decision") or ("suggest" if b.get("status") == "partial" else "auto_match"),
                 b.get("confidence") or "",
                 b.get("reason") or "",
+                evidence_text,
                 nums,
                 f"{allocated:.2f}",
+                suggested_nums,
+                f"{suggested_amount:.2f}",
                 f"{b['remaining']:.2f}",
             ])
             yield out.getvalue()
@@ -1606,8 +2131,9 @@ async def export_allocation_xlsx(run_id: str, current=Depends(get_current_user))
 
     ws = wb.create_sheet("Allocations")
     ws.append([_hdr(ws, h) for h in [
-        "Bank Date", "Bank Reference", "Bank Payer", "Bank Amount", "Status",
-        "Confidence", "Why matched?", "Matched Invoices", "Allocated", "Bank Remaining",
+        "Bank Date", "Bank Reference", "Bank Payer", "Bank Amount", "Status", "Decision",
+        "Confidence", "Why matched?", "Evidence", "Matched Invoices", "Allocated",
+        "Suggested Invoices", "Suggested Amount", "Bank Remaining",
     ]])
 
     async for b in db.allocation_bank_rows.find(
@@ -1615,16 +2141,27 @@ async def export_allocation_xlsx(run_id: str, current=Depends(get_current_user))
     ).sort("idx", 1):
         nums = ", ".join((m.get("invoice_number") or "?") for m in b.get("matches", []))
         allocated = round(sum(m["amount"] for m in b.get("matches", [])), 2)
+        suggested_nums = ", ".join((m.get("invoice_number") or "?") for m in b.get("suggestions", []))
+        suggested_amount = round(sum(m["amount"] for m in b.get("suggestions", [])), 2)
+        evidence = b.get("evidence") or {}
+        evidence_text = "; ".join(
+            f"{key.replace('_', ' ')}: {value}"
+            for key, value in evidence.items() if value not in (None, "", False, "none")
+        )
         ws.append([
             b.get("date") or "",
             b.get("reference") or "",
             b.get("payer") or "",
             b["amount"],
             b["status"],
+            b.get("decision") or ("suggest" if b.get("status") == "partial" else "auto_match"),
             b.get("confidence") or "",
             b.get("reason") or "",
+            evidence_text,
             nums,
             allocated,
+            suggested_nums,
+            suggested_amount,
             b["remaining"],
         ])
 
@@ -1668,6 +2205,136 @@ async def export_allocation_xlsx(run_id: str, current=Depends(get_current_user))
     )
 
 
+@api.post("/allocations/{run_id}/suggestions/{bank_row_id}/accept")
+async def accept_suggestion(run_id: str, bank_row_id: str, current=Depends(get_current_user)):
+    require_role(current, ["admin", "user"])
+    run = await db.allocation_runs.find_one({"id": run_id, "org_id": current["org_id"]}, {"_id": 0, "id": 1})
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    row_query = {"run_id": run_id, "org_id": current["org_id"], "id": bank_row_id}
+    bank = await db.allocation_bank_rows.find_one(row_query, {"_id": 0})
+    suggestions = (bank or {}).get("suggestions") or []
+    if not bank:
+        raise HTTPException(status_code=404, detail="Bank row not found")
+    if bank.get("decision") != "suggest" or not suggestions:
+        raise HTTPException(status_code=409, detail="This suggestion is no longer pending")
+
+    invoice_snapshots = []
+    for suggestion in suggestions:
+        invoice = await db.allocation_invoice_rows.find_one(
+            {"run_id": run_id, "org_id": current["org_id"], "id": suggestion.get("invoice_id")}, {"_id": 0}
+        )
+        amount = round(float(suggestion.get("amount") or 0), 2)
+        if not invoice or amount <= 0:
+            raise HTTPException(status_code=409, detail="A suggested invoice is no longer available")
+        current_remaining = round(float(invoice.get("remaining") or 0), 2)
+        expected_before = round(float(suggestion.get("invoice_outstanding_before") or 0), 2)
+        if current_remaining + 0.005 < amount or abs(current_remaining - expected_before) > 0.005:
+            raise HTTPException(status_code=409, detail="Invoice balances changed; refresh and review the suggestion again")
+        invoice_snapshots.append((suggestion, invoice, amount, current_remaining))
+
+    now = datetime.now(timezone.utc).isoformat()
+    committed_links = []
+    applied = []
+    for suggestion, invoice, amount, current_remaining in invoice_snapshots:
+        link = {**suggestion}
+        link.pop("provisional", None)
+        link.update({
+            "confidence": "manual", "confirmed_by_user": True,
+            "reviewed_by": current["id"], "reviewed_at": now,
+            "invoice_outstanding_before": current_remaining,
+            "invoice_outstanding_after": round(current_remaining - amount, 2),
+            "reason": f"User accepted suggestion: {suggestion.get('reason') or 'proposed allocation'}",
+        })
+        new_invoice_matches = [*invoice.get("matches", []), link]
+        new_remaining = round(current_remaining - amount, 2)
+        result = await db.allocation_invoice_rows.update_one(
+            {"run_id": run_id, "org_id": current["org_id"], "id": invoice["id"], "remaining": invoice["remaining"]},
+            {"$set": {
+                "matches": new_invoice_matches, "remaining": new_remaining,
+                "status": "full" if new_remaining <= 0.005 else "partial",
+            }},
+        )
+        if result.modified_count != 1:
+            for old_invoice in applied:
+                await db.allocation_invoice_rows.update_one(
+                    {"run_id": run_id, "org_id": current["org_id"], "id": old_invoice["id"]},
+                    {"$set": {
+                        "matches": old_invoice.get("matches", []), "remaining": old_invoice["remaining"],
+                        "status": old_invoice.get("status", "unmatched"),
+                    }},
+                )
+            raise HTTPException(status_code=409, detail="Invoice balances changed; no suggestion was applied")
+        applied.append(invoice)
+        committed_links.append(link)
+
+    accepted_amount = round(sum(link["amount"] for link in committed_links), 2)
+    new_bank_remaining = round(float(bank.get("remaining") or 0) - accepted_amount, 2)
+    new_bank_remaining = max(0.0, new_bank_remaining)
+    new_status = "full" if new_bank_remaining <= 0.005 else "partial"
+    bank_result = await db.allocation_bank_rows.update_one(
+        {**row_query, "decision": "suggest"},
+        {"$set": {
+            "matches": [*bank.get("matches", []), *committed_links], "suggestions": [],
+            "remaining": new_bank_remaining, "status": new_status, "decision": "manual",
+            "confidence": "manual", "reason": "Suggested allocation accepted by user",
+            "evidence.decision_reason": "Suggested allocation accepted by user",
+        }},
+    )
+    if bank_result.modified_count != 1:
+        for old_invoice in applied:
+            await db.allocation_invoice_rows.update_one(
+                {"run_id": run_id, "org_id": current["org_id"], "id": old_invoice["id"]},
+                {"$set": {
+                    "matches": old_invoice.get("matches", []), "remaining": old_invoice["remaining"],
+                    "status": old_invoice.get("status", "unmatched"),
+                }},
+            )
+        raise HTTPException(status_code=409, detail="Suggestion changed; no suggestion was applied")
+
+    await rebuild_exceptions(run_id, current["id"], current["org_id"])
+    stats = await _recompute_stats(run_id, current["org_id"])
+    await db.allocation_runs.update_one({"id": run_id, "org_id": current["org_id"]}, {"$set": {"stats": stats}})
+    await write_audit(current["id"], run_id, "suggestion_accepted", {
+        "bank_row_id": bank_row_id, "bank_reference": bank.get("reference"),
+        "invoice_numbers": [link.get("invoice_number") for link in committed_links], "amount": accepted_amount,
+    }, current["org_id"])
+    return {"ok": True, "stats": stats}
+
+
+@api.post("/allocations/{run_id}/suggestions/{bank_row_id}/reject")
+async def reject_suggestion(run_id: str, bank_row_id: str, current=Depends(get_current_user)):
+    require_role(current, ["admin", "user"])
+    row_query = {"run_id": run_id, "org_id": current["org_id"], "id": bank_row_id}
+    bank = await db.allocation_bank_rows.find_one(row_query, {"_id": 0})
+    if not bank:
+        raise HTTPException(status_code=404, detail="Bank row not found")
+    if bank.get("decision") != "suggest" or not bank.get("suggestions"):
+        raise HTTPException(status_code=409, detail="This suggestion is no longer pending")
+    has_committed = bool(bank.get("matches"))
+    new_status = "overpaid" if has_committed else "unmatched"
+    new_decision = "auto_match" if has_committed else "no_match"
+    reason = "Suggestion rejected; committed reference allocation retained" if has_committed else "Suggestion rejected by user"
+    result = await db.allocation_bank_rows.update_one(
+        {**row_query, "decision": "suggest"},
+        {"$set": {
+            "suggestions": [], "status": new_status, "decision": new_decision,
+            "confidence": "high" if has_committed else None, "reason": reason,
+            "overpaid_amount": bank.get("remaining", 0) if has_committed else 0,
+            "evidence.decision_reason": reason,
+        }},
+    )
+    if result.modified_count != 1:
+        raise HTTPException(status_code=409, detail="Suggestion changed; refresh before reviewing again")
+    await rebuild_exceptions(run_id, current["id"], current["org_id"])
+    stats = await _recompute_stats(run_id, current["org_id"])
+    await db.allocation_runs.update_one({"id": run_id, "org_id": current["org_id"]}, {"$set": {"stats": stats}})
+    await write_audit(current["id"], run_id, "suggestion_rejected", {
+        "bank_row_id": bank_row_id, "bank_reference": bank.get("reference"),
+    }, current["org_id"])
+    return {"ok": True, "stats": stats}
+
+
 @api.post("/allocations/{run_id}/manual-link")
 async def manual_link(run_id: str, payload: ManualLinkIn, current=Depends(get_current_user)):
     require_role(current, ["admin", "user"])
@@ -1702,13 +2369,16 @@ async def manual_link(run_id: str, payload: ManualLinkIn, current=Depends(get_cu
     bank["remaining"] = round(bank["remaining"] - amt, 2)
     inv["remaining"] = round(inv["remaining"] - amt, 2)
     bank["status"] = "manual" if bank["remaining"] <= 0.005 else "partial"
+    bank["decision"] = "manual"
+    bank["suggestions"] = []
     bank["confidence"] = "manual"
     inv["status"] = "full" if inv["remaining"] <= 0.005 else "partial"
 
     await db.allocation_bank_rows.update_one(
         {"run_id": run_id, "org_id": current["org_id"], "id": bank["id"]},
         {"$set": {"matches": bank["matches"], "remaining": bank["remaining"],
-                  "status": bank["status"], "confidence": bank["confidence"], "reason": "Includes manual override"}},
+                  "status": bank["status"], "decision": bank["decision"], "suggestions": [],
+                  "confidence": bank["confidence"], "reason": "Includes manual override"}},
     )
     await db.allocation_invoice_rows.update_one(
         {"run_id": run_id, "org_id": current["org_id"], "id": inv["id"]},
@@ -1758,10 +2428,12 @@ async def manual_unlink(run_id: str, payload: ManualUnlinkIn, current=Depends(ge
     bank["remaining"] = round(float(bank.get("remaining") or 0) + amt, 2)
     inv["remaining"] = round(float(inv.get("remaining") or 0) + amt, 2)
     bank["status"] = "unmatched" if not bank["matches"] else "partial"
+    bank["decision"] = "no_match" if not bank["matches"] else "manual"
     inv["status"] = "unmatched" if not inv["matches"] else ("full" if inv["remaining"] <= 0.005 else "partial")
     await db.allocation_bank_rows.update_one(
         {"run_id": run_id, "org_id": current["org_id"], "id": bank["id"]},
-        {"$set": {"matches": bank["matches"], "remaining": bank["remaining"], "status": bank["status"], "reason": "Manual allocation unlinked"}},
+        {"$set": {"matches": bank["matches"], "remaining": bank["remaining"], "status": bank["status"],
+                  "decision": bank["decision"], "reason": "Manual allocation unlinked"}},
     )
     await db.allocation_invoice_rows.update_one(
         {"run_id": run_id, "org_id": current["org_id"], "id": inv["id"]},
@@ -1798,9 +2470,10 @@ async def _recompute_stats(run_id: str, org_id: str) -> Dict[str, Any]:
     total_invoices = await db.allocation_invoice_rows.count_documents(q)
     full = await db.allocation_bank_rows.count_documents({**q, "status": "full"})
     partial = await db.allocation_bank_rows.count_documents({**q, "status": "partial"})
+    suggested = await db.allocation_bank_rows.count_documents({**q, "decision": "suggest"})
     unmatched_bank = await db.allocation_bank_rows.count_documents({**q, "status": "unmatched"})
     overpaid = await db.allocation_bank_rows.count_documents({**q, "status": "overpaid"})
-    manual = await db.allocation_bank_rows.count_documents({**q, "status": "manual"})
+    manual = await db.allocation_bank_rows.count_documents({**q, "$or": [{"status": "manual"}, {"decision": "manual"}]})
     unmatched_inv = await db.allocation_invoice_rows.count_documents({**q, "status": "unmatched"})
     exceptions = await db.exceptions.count_documents(q)
     agg_alloc = await db.allocation_bank_rows.aggregate([
@@ -1816,7 +2489,7 @@ async def _recompute_stats(run_id: str, org_id: str) -> Dict[str, Any]:
     total_outstanding = round(agg_out[0]["total"], 2) if agg_out else 0.0
     return {
         "total_bank": total_bank, "total_invoices": total_invoices,
-        "fully_matched": full, "partially_matched": partial,
+        "fully_matched": full, "partially_matched": partial, "suggested_matches": suggested,
         "overpaid": overpaid, "manual": manual,
         "unmatched_bank": unmatched_bank, "unmatched_invoices": unmatched_inv,
         "exceptions": exceptions, "total_allocated": total_allocated, "total_outstanding": total_outstanding,

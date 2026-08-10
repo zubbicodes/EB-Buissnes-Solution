@@ -135,16 +135,19 @@ def test_pass2_debtor_name_enrichment(client):
     run = _create_run(client, bank, inv)
     b = _find_bank(client, run["id"], "Globex")
     assert b is not None, f"bank row missing for Globex"
-    assert b["matches"], "expected at least one match"
-    debtor_matches = [m for m in b["matches"] if m["method"] == "debtor_name"]
-    assert debtor_matches, f"expected pass-2 debtor_name match, got {[m['method'] for m in b['matches']]}"
+    links = [*b.get("matches", []), *b.get("suggestions", [])]
+    assert links, "expected at least one match or suggestion"
+    debtor_matches = [m for m in links if m["method"] == "debtor_name"]
+    assert debtor_matches, f"expected debtor_name evidence, got {[m['method'] for m in links]}"
     m = debtor_matches[0]
-    assert "Debtor name similarity" in m["reason"]
+    assert "debtor" in m["reason"].lower()
     assert "score" in m and isinstance(m["score"], (int, float))
     # enriched fields
     assert m["invoice_amount"] == 500.00
     assert m["invoice_outstanding_before"] == 500.00
     assert abs(m["invoice_outstanding_after"] - 0.0) < 0.01
+    if b.get("decision") == "suggest":
+        assert b["remaining"] == 500.0
 
 
 # ---------- Matching hierarchy — Pass 1 wins; Pass 2 not added ----------

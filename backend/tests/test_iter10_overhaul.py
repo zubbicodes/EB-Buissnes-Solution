@@ -2,8 +2,8 @@
 Iteration 10 — backend regression tests for the strict-classification overhaul.
 Covers:
   - WRatio case-insensitivity fix (processor=rf_utils.default_process)
-  - Rule C: reference + supporting debtor name (>=85) + fully consumed => FULL
-  - Pass 2.5: token-substring fallback (debtor_tokens method, low confidence, never FULL)
+  - Reference matches never use another debtor to consume a remainder
+  - Weak token-only evidence never reserves invoice balances
   - distinctive_tokens() filters corp suffixes & stop words
 """
 
@@ -164,9 +164,10 @@ def test_allcaps_bank_text_now_matches_debtor_name(client):
     b = _find_bank(run, "GLOBEX")
     assert b is not None
     # Must be at least PARTIAL with a debtor_name link (i.e. fix worked)
-    assert b["matches"], f"Pass 2 still failing on case mismatch: {b}"
-    debtor_link = next((m for m in b["matches"] if m["method"] == "debtor_name"), None)
-    assert debtor_link is not None, f"no debtor_name link — case fix not working: {b}"
+    links = [*b.get("matches", []), *b.get("suggestions", [])]
+    assert links, f"Name matching still failing on case mismatch: {b}"
+    debtor_link = next((m for m in links if m["method"] in ("debtor_name", "debtor_exact", "debtor_prefix")), None)
+    assert debtor_link is not None, f"no debtor evidence link — case fix not working: {b}"
     assert debtor_link["score"] >= 90, f"expected >=90 debtor score, got {debtor_link['score']}"
     # With score >=95 single candidate exact amount => Rule B FULL
     if debtor_link["score"] >= 95:
@@ -174,14 +175,14 @@ def test_allcaps_bank_text_now_matches_debtor_name(client):
         assert b["confidence"] == "high"
 
 
-# --------- BACKEND FIX 2: Rule C (ref + supporting debtor + exact) => FULL ---------
+# --------- Reference remainders never cross debtor boundaries ---------
 def test_rule_c_ref_plus_debtor_emmerson_multi_invoice(client):
     # User's positive-feedback canonical case:
     #   bank: 'EMMERSON TRANSPORT KREF FORD CIVIL ENG INV 2008666' £6600
     #   inv1: ref 2008666 Emmerson Transport £1200
     #   inv2: Ford Civil Engineering £5400 (no ref hit, debtor name found)
     # Expected: ref consumes 1200, debtor_name fuzzy on Ford Civil consumes 5400 -> fully consumed.
-    # Rule C should kick in: ref + debtor>=85 + fully consumed => FULL.
+    # The referenced debtor wins; Ford Civil must not consume the remainder.
     bank = (
         "Date,Amount,Reference,Payer\n"
         "2026-01-05,6600.00,EMMERSON TRANSPORT KREF FORD CIVIL ENG INV 2008666,\n"
@@ -194,16 +195,16 @@ def test_rule_c_ref_plus_debtor_emmerson_multi_invoice(client):
     run = _run(client, bank, inv)
     b = _find_bank(run, "EMMERSON")
     assert b is not None
-    assert b["status"] == "full", (
-        f"Rule C failed — expected FULL, got {b['status']} "
+    assert b["status"] == "overpaid", (
+        f"Expected reference-only overpayment, got {b['status']} "
         f"reason={b.get('reason')} matches={b.get('matches')}"
     )
     assert b["confidence"] == "high"
-    assert "confirmed by debtor name" in b["reason"].lower() or "exact amount consumed" in b["reason"].lower()
+    assert all(m["method"] == "reference" for m in b["matches"])
 
 
 def test_rule_c_does_not_promote_if_debtor_below_85(client):
-    # Same shape but second invoice debtor name unrelated => no Rule C => PARTIAL.
+    # Same shape with an unrelated second debtor: retain only the reference allocation.
     bank = (
         "Date,Amount,Reference,Payer\n"
         "2026-01-05,6600.00,KREF ZZUNKNOWN INV 2008888,\n"
@@ -217,13 +218,13 @@ def test_rule_c_does_not_promote_if_debtor_below_85(client):
     b = _find_bank(run, "2008888")
     assert b is not None
     # The 1200 ref hits but 5400 remains unallocated (no debtor name match)
-    assert b["status"] in ("partial",), (
-        f"expected partial (no Rule C trigger), got {b['status']} reason={b['reason']}"
+    assert b["status"] == "overpaid", (
+        f"expected overpaid (no same-debtor remainder), got {b['status']} reason={b['reason']}"
     )
 
 
 # --------- BACKEND NEW: Pass 2.5 token-substring fallback ---------
-def test_pass_2_5_debtor_tokens_low_confidence(client):
+def test_noisy_token_evidence_is_only_suggested_or_unmatched(client):
     # Bank text is very noisy: distinctive tokens of debtor name appear as substrings
     # but the WRatio scoring is too low (lots of noise) so Pass 2 misses it.
     # Two distinctive tokens 'ford' and 'civil' present in bank text.
@@ -239,20 +240,11 @@ def test_pass_2_5_debtor_tokens_low_confidence(client):
     run = _run(client, bank, inv)
     b = _find_bank(run, "FORD")
     assert b is not None, f"bank row missing; rows={[r.get('reference') for r in run['bank_rows']]}"
-    # Expect at least one debtor_tokens or debtor_name match
-    methods = [m["method"] for m in b["matches"]]
-    assert "debtor_tokens" in methods or "debtor_name" in methods, (
-        f"Pass 2.5 fallback did not surface debtor: matches={b['matches']} reason={b['reason']}"
-    )
-    # Must NEVER be FULL via debtor_tokens alone (low confidence)
-    if "debtor_tokens" in methods and "debtor_name" not in methods and not any(m["method"] == "reference" for m in b["matches"]):
-        assert b["status"] != "full", f"debtor_tokens promoted to FULL — must not: {b}"
-        # confidence must stay low or medium
-        assert b["confidence"] in ("low", "medium"), f"unexpected confidence {b['confidence']}"
-        # match should record low confidence
-        dt = [m for m in b["matches"] if m["method"] == "debtor_tokens"][0]
-        assert dt["confidence"] == "low"
-        assert "distinctive debtor tokens" in dt["reason"]
+    links = [*b.get("matches", []), *b.get("suggestions", [])]
+    assert b["decision"] in ("suggest", "no_match")
+    assert b["matches"] == []
+    if links:
+        assert all(m["method"] == "debtor_name" for m in links)
 
 
 def test_pass_2_5_skipped_when_no_remaining(client):
@@ -270,7 +262,7 @@ def test_pass_2_5_skipped_when_no_remaining(client):
     run = _run(client, bank, inv)
     b = _find_bank(run, "INV-T0200")
     assert b is not None
-    methods = [m["method"] for m in b["matches"]]
+    methods = [m["method"] for m in [*b.get("matches", []), *b.get("suggestions", [])]]
     assert "debtor_tokens" not in methods, f"Pass 2.5 should be skipped — bank fully consumed: {b}"
     assert b["status"] == "full"
 
@@ -289,7 +281,7 @@ def test_pass_2_5_needs_at_least_2_distinctive_tokens(client):
     run = _run(client, bank, inv)
     b = _find_bank(run, "RANDOM")
     assert b is not None
-    methods = [m["method"] for m in b["matches"]]
+    methods = [m["method"] for m in [*b.get("matches", []), *b.get("suggestions", [])]]
     assert "debtor_tokens" not in methods, f"Pass 2.5 fired with <2 distinctive tokens: {b}"
 
 
@@ -300,7 +292,7 @@ def test_six_row_canonical_scenario(client):
         "Date,Amount,Reference,Payer\n"
         # 1) ref + exact => FULL (Rule A)
         "2026-01-01,1200.00,Payment INV-9001,\n"
-        # 2) ref + supporting debtor + exact => FULL (Rule C)
+        # 2) reference hit with a different-debtor remainder => OVERPAID
         "2026-01-02,6600.00,EMMERSON TRANSPORT KREF FORD CIVIL ENG INV 2008666,\n"
         # 3) ALL-CAPS unique 95% debtor + exact => FULL (Rule B with case fix)
         #    Use the SLARK example from the spec which the main agent verified at 95%.
@@ -329,12 +321,12 @@ def test_six_row_canonical_scenario(client):
     # 1) Rule A
     r1 = by_ref["Payment INV-9001"]
     assert r1["status"] == "full" and r1["confidence"] == "high"
-    assert "matched and exact amount consumed" in r1["reason"]
+    assert "Invoice reference matched" in r1["reason"]
 
-    # 2) Rule C
+    # 2) Reference isolation
     r2 = by_ref["EMMERSON TRANSPORT KREF FORD CIVIL ENG INV 2008666"]
-    assert r2["status"] == "full" and r2["confidence"] == "high", (
-        f"Rule C should reach FULL — got {r2['status']} reason={r2['reason']}"
+    assert r2["status"] == "overpaid" and r2["confidence"] == "high", (
+        f"Reference must not allocate to another debtor — got {r2['status']} reason={r2['reason']}"
     )
 
     # 3) Rule B with case fix
@@ -348,12 +340,10 @@ def test_six_row_canonical_scenario(client):
     assert r4["status"] == "unmatched"
     assert r4["confidence"] is None
 
-    # 5) ambiguous PARTIAL
+    # 5) single generic token is insufficient
     r5 = by_ref["Smith"]
-    assert r5["status"] == "partial"
-    assert "multiple candidates" in r5["reason"].lower()
+    assert r5["status"] == "unmatched"
 
-    # 6) ref + overflow => PARTIAL with 'unallocated'
+    # 6) ref + overflow => OVERPAID
     r6 = by_ref["Payment INV-4001"]
-    assert r6["status"] == "partial"
-    assert "unallocated" in r6["reason"].lower()
+    assert r6["status"] == "overpaid"

@@ -73,7 +73,7 @@ export default function Dashboard() {
   const totals = (runs || []).reduce((acc, r) => {
     acc.allocated += r.stats?.total_allocated || 0;
     acc.full += r.stats?.fully_matched || 0;
-    acc.partial += r.stats?.partially_matched || 0;
+    acc.partial += (r.stats?.suggested_matches ?? r.stats?.partially_matched ?? 0);
     acc.unmatched += r.stats?.unmatched_bank || 0;
     return acc;
   }, { allocated: 0, full: 0, partial: 0, unmatched: 0 });

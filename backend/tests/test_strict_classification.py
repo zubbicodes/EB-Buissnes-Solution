@@ -6,7 +6,7 @@ Rules under test:
   Otherwise (with any match) => PARTIAL (suggested)
   No match => UNMATCHED
 Plus assertions for new fields: reason (str), score (number), ambiguous (bool),
-confidence (high/medium/low), and threshold (>=70 fuzzy candidates).
+confidence (high/medium/low), and the >=85 suggestion threshold.
 """
 
 import os
@@ -128,7 +128,7 @@ def test_full_pure_reference_exact_amount(client):
     assert b["status"] == "full", f"expected full, got {b['status']} reason={b.get('reason')}"
     assert b["confidence"] == "high"
     assert "Invoice reference" in b["reason"]
-    assert "fully consumed" in b["reason"]
+    assert "Invoice reference matched" in b["reason"]
     assert len(b["matches"]) == 1
     assert b["matches"][0]["method"] == "reference"
 
@@ -152,11 +152,12 @@ def test_partial_debtor_fuzzy_90(client):
     assert b["status"] == "partial", f"expected partial, got {b['status']} reason={b.get('reason')}"
     # confidence is medium or low (must NOT be high for debtor-only sub-95 match)
     assert b["confidence"] in ("medium", "low")
-    assert any(m["method"] == "debtor_name" for m in b["matches"])
-    m = b["matches"][0]
+    assert b["matches"] == []  # suggestions must not reserve balances
+    assert any(m["method"] == "debtor_name" for m in b["suggestions"])
+    m = b["suggestions"][0]
     assert "score" in m and isinstance(m["score"], (int, float))
     assert "ambiguous" in m and isinstance(m["ambiguous"], bool)
-    assert "Debtor name similarity" in b["reason"]
+    assert "Suggested debtor" in b["reason"]
 
 
 # -------------------- Ambiguity: multiple plausible candidates -> PARTIAL ----
@@ -173,12 +174,12 @@ def test_partial_ambiguous_multiple_candidates(client):
     run = _run(client, bank, inv)
     b = _find_bank(run, "Smith")
     assert b is not None
-    assert b["status"] == "partial"
-    assert any(m.get("ambiguous") is True for m in b["matches"])
-    assert "multiple candidates" in b["reason"].lower()
+    assert b["status"] == "unmatched"
+    assert b["decision"] == "no_match"
+    assert b["matches"] == [] and b["suggestions"] == []
 
 
-# -------------------- Unmatched: no ref, no debtor >= 70 ---------------------
+# -------------------- Unmatched: no ref, no debtor >= 85 ---------------------
 def test_unmatched_no_signal(client):
     bank = (
         "Date,Amount,Reference,Payer\n"
