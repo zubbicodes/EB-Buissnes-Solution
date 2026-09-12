@@ -21,10 +21,11 @@ from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depend
 from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel, Field, EmailStr
+from pydantic import BaseModel, ConfigDict, Field, EmailStr, TypeAdapter, ValidationError, field_validator
 from rapidfuzz import fuzz, process as rf_process, utils as rf_utils
 from collections import defaultdict
 from openpyxl import Workbook, load_workbook
+from pymongo.errors import DuplicateKeyError
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token as google_id_token
 try:
@@ -166,6 +167,22 @@ class RegisterIn(BaseModel):
 class LoginIn(BaseModel):
     email: EmailStr
     password: str
+
+
+class PlatformAccountUpdateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
+
+    email: EmailStr
+    current_password: str = Field(min_length=1, max_length=72)
+    new_password: Optional[str] = Field(default=None, min_length=12, max_length=72)
+
+    @field_validator("current_password", "new_password")
+    @classmethod
+    def password_bytes(cls, value):
+        if value is not None and len(value.encode("utf-8")) > 72:
+            raise ValueError("Password must be at most 72 UTF-8 bytes")
+        return value
+
 
 class GoogleAuthIn(BaseModel):
     credential: str = Field(min_length=1)
@@ -1583,6 +1600,39 @@ async def me(current=Depends(get_identity)):
     return current
 
 
+@api.put("/admin/account")
+async def update_platform_account(payload: PlatformAccountUpdateIn, response: Response,
+                                  current=Depends(get_platform_admin)):
+    user = await db.users.find_one({"id": current["id"]})
+    if not user or not user.get("password_hash"):
+        raise HTTPException(400, "Set a password before changing this account")
+    if not verify_password(payload.current_password, user["password_hash"]):
+        raise HTTPException(400, "Current password is incorrect")
+
+    email = str(payload.email).lower()
+    email_changed = email != user["email"].lower()
+    if not email_changed and payload.new_password is None:
+        raise HTTPException(400, "Change the email or enter a new password")
+
+    changes = {"email": email, "updated_at": datetime.now(timezone.utc).isoformat()}
+    if payload.new_password is not None:
+        changes["password_hash"] = hash_password(payload.new_password)
+    update = {"$set": changes, "$inc": {"auth_version": 1}, "$unset": {"account_link": ""}}
+    if email_changed:
+        # An old Google identity must not retain access after the account email changes.
+        update["$unset"]["google_sub"] = ""
+    try:
+        result = await db.users.update_one({"id": current["id"], "role": "platform_admin"}, update)
+    except DuplicateKeyError:
+        raise HTTPException(409, "That email address already has an account")
+    if result.matched_count != 1:
+        raise HTTPException(404, "Platform administrator account not found")
+
+    response.delete_cookie("access_token", path="/")
+    response.delete_cookie("refresh_token", path="/")
+    return {"ok": True, "email": email}
+
+
 @api.post("/auth/complete-account")
 async def complete_account(payload: RedeemInput):
     return await redeem_account_link(db, payload, hash_password)
@@ -2894,13 +2944,57 @@ async def startup():
     platform_email = os.environ.get("PLATFORM_ADMIN_EMAIL", "").strip().lower()
     if platform_email:
         operator = await db.users.find_one({"email": platform_email})
-        if not operator:
+        existing_platform = await db.users.find_one({"role": "platform_admin"})
+        if existing_platform:
+            if not operator or operator.get("role") != "platform_admin":
+                logger.warning("PLATFORM_ADMIN_EMAIL does not match the current platform administrator; bootstrap was ignored")
+        elif not operator:
             raise RuntimeError("PLATFORM_ADMIN_EMAIL must identify an existing dedicated operator account")
-        if operator.get("role") != "platform_admin":
+        else:
             await db.users.update_one({"id": operator["id"]}, {
                 "$set": {"role": "platform_admin", "active": True},
                 "$inc": {"auth_version": 1}, "$unset": {"account_link": ""}})
             logger.info("Dedicated platform administrator enabled")
+
+    # A predictable local operator is useful for UI development. These variables are
+    # ignored in production even if they are accidentally present.
+    if APP_ENV != "production":
+        dev_email = os.environ.get("DEV_PLATFORM_ADMIN_EMAIL", "").strip().lower()
+        dev_password = os.environ.get("DEV_PLATFORM_ADMIN_PASSWORD", "")
+        if bool(dev_email) != bool(dev_password):
+            raise RuntimeError("Set both DEV_PLATFORM_ADMIN_EMAIL and DEV_PLATFORM_ADMIN_PASSWORD")
+        if dev_email:
+            try:
+                dev_email = str(TypeAdapter(EmailStr).validate_python(dev_email)).lower()
+            except ValidationError as exc:
+                raise RuntimeError("DEV_PLATFORM_ADMIN_EMAIL must be a valid email address") from exc
+        if dev_email and (len(dev_password) < 12 or len(dev_password.encode("utf-8")) > 72):
+            raise RuntimeError("DEV_PLATFORM_ADMIN_PASSWORD must be 12-72 UTF-8 bytes")
+        if dev_email:
+            dev = await db.users.find_one({"$or": [
+                {"id": "development-platform-admin"}, {"email": dev_email},
+            ]})
+            if not dev:
+                await db.users.insert_one({
+                    "id": "development-platform-admin", "email": dev_email,
+                    "name": "Developer Administrator", "role": "platform_admin",
+                    "active": True, "account_state": "active", "auth_version": 0,
+                    "password_hash": hash_password(dev_password),
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                })
+                logger.info("Development platform administrator created")
+            elif dev.get("role") != "platform_admin":
+                raise RuntimeError("DEV_PLATFORM_ADMIN_EMAIL belongs to a non-platform account")
+            elif (dev.get("email") != dev_email or dev.get("active") is False
+                  or dev.get("account_state") == "invited" or not dev.get("password_hash")
+                  or not verify_password(dev_password, dev["password_hash"])):
+                await db.users.update_one({"id": dev["id"]}, {
+                    "$set": {"email": dev_email, "password_hash": hash_password(dev_password),
+                             "active": True, "account_state": "active",
+                             "updated_at": datetime.now(timezone.utc).isoformat()},
+                    "$inc": {"auth_version": 1}, "$unset": {"account_link": ""},
+                })
+                logger.info("Development platform administrator refreshed")
 
 
 @app.on_event("shutdown")

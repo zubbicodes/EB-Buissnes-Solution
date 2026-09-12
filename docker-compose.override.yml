@@ -2,6 +2,11 @@
 # Coolify deploys with `-f docker-compose.yml` only, so this file is ignored
 # there (which is what we want: no host port bindings on the server).
 services:
+  backend:
+    environment:
+      DEV_PLATFORM_ADMIN_EMAIL: ${DEV_PLATFORM_ADMIN_EMAIL:-developer@example.com}
+      DEV_PLATFORM_ADMIN_PASSWORD: ${DEV_PLATFORM_ADMIN_PASSWORD:-Developer@2026!}
+
   frontend:
     ports:
       - "3000:80"

@@ -112,6 +112,52 @@ def test_platform_financial_boundary_and_client_admin_boundary(monkeypatch):
     run_scenario(monkeypatch, scenario)
 
 
+def test_platform_account_email_and_password_change(monkeypatch):
+    async def scenario(api, db):
+        old_email = "operator@example.com"
+        old_password = "Existing-password-123"
+        new_password = "Replacement-password-456"
+        await db.users.update_one({"id": "operator"}, {"$set": {
+            "email": old_email, "password_hash": server.hash_password(old_password),
+            "google_sub": "old-google-identity"
+        }})
+        endpoint = "/api/admin/account"
+
+        forbidden = await api.put(endpoint, headers=headers(CLIENT_USER), json={
+            "email": CLIENT_USER["email"], "current_password": old_password,
+        })
+        assert forbidden.status_code == 403
+        wrong = await api.put(endpoint, headers=headers(OPERATOR), json={
+            "email": "operator-updated@example.com", "current_password": "incorrect-password",
+        })
+        assert wrong.status_code == 400
+        await db.users.update_one({"id": "alice"}, {"$set": {"email": "existing@example.com"}})
+        duplicate = await api.put(endpoint, headers=headers(OPERATOR), json={
+            "email": "existing@example.com", "current_password": old_password,
+        })
+        assert duplicate.status_code == 409
+
+        changed = await api.put(endpoint, headers=headers(OPERATOR), json={
+            "email": "operator-updated@example.com", "current_password": old_password,
+            "new_password": new_password,
+        })
+        assert changed.status_code == 200, changed.text
+        assert changed.json() == {"ok": True, "email": "operator-updated@example.com"}
+        saved = await db.users.find_one({"id": "operator"})
+        assert saved["role"] == "platform_admin" and saved["auth_version"] == 1
+        assert saved["email"] == "operator-updated@example.com" and "google_sub" not in saved
+        assert server.verify_password(new_password, saved["password_hash"])
+        assert (await api.get("/api/auth/me", headers=headers(OPERATOR))).status_code == 401
+        assert (await api.post("/api/auth/login", json={
+            "email": old_email, "password": old_password,
+        })).status_code == 401
+        login = await api.post("/api/auth/login", json={
+            "email": saved["email"], "password": new_password,
+        })
+        assert login.status_code == 200 and login.json()["role"] == "platform_admin"
+    run_scenario(monkeypatch, scenario)
+
+
 def test_invitation_reset_expiry_replay_and_secret_redaction(monkeypatch):
     async def scenario(api, db):
         h = headers(OPERATOR)

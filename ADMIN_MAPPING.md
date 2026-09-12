@@ -9,7 +9,21 @@ The `/admin` area is for a dedicated **platform administrator**. Client `admin`,
 3. Restart the backend and sign in again. Startup promotes only that existing account; it does not generate or expose a password. Existing sessions are revoked on promotion.
 4. The account opens `/admin`. Platform-admin requests to client financial routes are rejected by the API, including uploads, allocation edits, deletes, reports, and exports. There is no impersonation endpoint.
 
+The operator can change their login email or password under **Account settings**. The current password is required and all existing sessions are revoked after a change. `PLATFORM_ADMIN_EMAIL` is only a first-operator bootstrap value; once an operator exists it cannot promote another account. Update the variable to the current email to keep the deployment configuration clear.
+
 Removing the environment variable does not demote an existing operator. Role removal is a controlled database maintenance action. Keep production `APP_ENV=production`, a strong `JWT_SECRET`, HTTPS cookies, and default-admin seeding disabled as described in `DELIVERY_CHECKLIST.md`.
+
+## Local developer account
+
+`docker compose up --build` also reads `docker-compose.override.yml` and creates a development-only platform administrator:
+
+```text
+Email: developer@example.com
+Password: Developer@2026!
+```
+
+Open `http://localhost:3000/signin` and use those credentials to view `/admin` while developing. Override them with `DEV_PLATFORM_ADMIN_EMAIL` and `DEV_PLATFORM_ADMIN_PASSWORD` in a local `.env` file. The backend ignores both variables when `APP_ENV=production`, and Coolify uses `docker-compose.yml` without the local override.
+The development values are authoritative: restarting the local backend restores that seeded account's configured email, password, and active status.
 
 ## Client setup and access
 

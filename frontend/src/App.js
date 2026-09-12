@@ -16,6 +16,7 @@ import Exceptions from "@/pages/Exceptions";
 import Users from "@/pages/Users";
 import Admin from "@/pages/Admin";
 import AccountSetup from "@/pages/AccountSetup";
+import AccountSettings from "@/pages/AccountSettings";
 
 function Protected({ platform = false }) {
   const { user } = useAuth();
@@ -51,7 +52,10 @@ export default function App() {
           <Route path="/signin" element={<PublicOnly><SignIn /></PublicOnly>} />
           <Route path="/signup" element={<PublicOnly><SignUp /></PublicOnly>} />
           <Route path="/account-setup" element={<AccountSetup />} />
-          <Route element={<Protected platform />}><Route path="/admin" element={<Admin />} /></Route>
+          <Route element={<Protected platform />}>
+            <Route path="/admin" element={<Admin />} />
+            <Route path="/admin/account" element={<AccountSettings />} />
+          </Route>
           <Route element={<Protected />}>
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/new" element={<NewAllocation />} />

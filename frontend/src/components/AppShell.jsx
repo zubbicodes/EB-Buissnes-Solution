@@ -5,7 +5,7 @@ import { api } from "@/lib/api";
 import {
   LayoutDashboard, GitCompareArrows, Users, ScrollText,
   LogOut, PlusCircle, Search, AlertTriangle, ShieldCheck,
-  CheckCircle2, XCircle, Clock3, FileCheck2,
+  CheckCircle2, XCircle, Clock3, FileCheck2, Settings,
 } from "lucide-react";
 import { BrandMark } from "@/components/DesignSystem";
 import topbarMoon from "@/assets/moon.png";
@@ -36,7 +36,10 @@ export default function AppShell({ children }) {
   const notificationRef = useRef(null);
   const hideTopbar = isPlatform || location.pathname === "/new" || location.pathname.startsWith("/allocations/") || location.pathname === "/debtors" || location.pathname === "/audit" || location.pathname === "/compare" || location.pathname === "/exceptions" || location.pathname === "/users";
   const compactLayout = location.pathname === "/new" || location.pathname.startsWith("/allocations/");
-  const visibleNav = isPlatform ? [{ to: "/admin", label: "Client administration", icon: ShieldCheck, testid: "nav-admin" }] : navItems.filter((item) => !item.adminOnly || user?.role === "admin");
+  const visibleNav = isPlatform ? [
+    { to: "/admin", label: "Client administration", icon: ShieldCheck, testid: "nav-admin", end: true },
+    { to: "/admin/account", label: "Account settings", icon: Settings, testid: "nav-account" },
+  ] : navItems.filter((item) => !item.adminOnly || user?.role === "admin");
   const initials = (user?.name || user?.email || "JD")
     .split(/[ @.]/)
     .filter(Boolean)
@@ -204,6 +207,7 @@ export default function AppShell({ children }) {
             <NavLink
               key={item.to}
               to={item.to}
+              end={item.end}
               data-testid={item.testid}
               className={({ isActive }) =>
                 `eb-nav-link ${isActive ? "eb-nav-link-active" : ""}`
@@ -249,6 +253,7 @@ export default function AppShell({ children }) {
               <NavLink
                 key={item.to}
                 to={item.to}
+                end={item.end}
                 className={({ isActive }) =>
                   `inline-flex shrink-0 items-center gap-2 rounded-[8px] px-3 py-2 text-sm font-medium ${
                     isActive ? "bg-[#0F172A] text-white" : "bg-[#F8FAFB] text-[#0F172A]/70"
