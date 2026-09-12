@@ -14,8 +14,10 @@ import Debtors from "@/pages/Debtors";
 import Audit from "@/pages/Audit";
 import Exceptions from "@/pages/Exceptions";
 import Users from "@/pages/Users";
+import Admin from "@/pages/Admin";
+import AccountSetup from "@/pages/AccountSetup";
 
-function Protected() {
+function Protected({ platform = false }) {
   const { user } = useAuth();
   if (user === null) {
     return (
@@ -25,6 +27,7 @@ function Protected() {
     );
   }
   if (!user) return <Navigate to="/signin" replace />;
+  if ((user.role === "platform_admin") !== platform) return <Navigate to={platform ? "/dashboard" : "/admin"} replace />;
   return (
     <AppShell>
       <Outlet />
@@ -35,7 +38,7 @@ function Protected() {
 function PublicOnly({ children }) {
   const { user } = useAuth();
   if (user === null) return null;
-  if (user) return <Navigate to="/dashboard" replace />;
+  if (user) return <Navigate to={user.role === "platform_admin" ? "/admin" : "/dashboard"} replace />;
   return children;
 }
 
@@ -47,6 +50,8 @@ export default function App() {
           <Route path="/" element={<PublicOnly><Landing /></PublicOnly>} />
           <Route path="/signin" element={<PublicOnly><SignIn /></PublicOnly>} />
           <Route path="/signup" element={<PublicOnly><SignUp /></PublicOnly>} />
+          <Route path="/account-setup" element={<AccountSetup />} />
+          <Route element={<Protected platform />}><Route path="/admin" element={<Admin />} /></Route>
           <Route element={<Protected />}>
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/new" element={<NewAllocation />} />

@@ -24,6 +24,8 @@ const navItems = [
 
 export default function AppShell({ children }) {
   const { user, logout } = useAuth();
+  const isPlatform = user?.role === "platform_admin";
+  const home = isPlatform ? "/admin" : "/dashboard";
   const navigate = useNavigate();
   const location = useLocation();
   const [searchTerm, setSearchTerm] = useState("");
@@ -32,9 +34,9 @@ export default function AppShell({ children }) {
   const [notificationOpen, setNotificationOpen] = useState(false);
   const [notificationLoading, setNotificationLoading] = useState(false);
   const notificationRef = useRef(null);
-  const hideTopbar = location.pathname === "/new" || location.pathname.startsWith("/allocations/") || location.pathname === "/debtors" || location.pathname === "/audit" || location.pathname === "/compare" || location.pathname === "/exceptions" || location.pathname === "/users";
+  const hideTopbar = isPlatform || location.pathname === "/new" || location.pathname.startsWith("/allocations/") || location.pathname === "/debtors" || location.pathname === "/audit" || location.pathname === "/compare" || location.pathname === "/exceptions" || location.pathname === "/users";
   const compactLayout = location.pathname === "/new" || location.pathname.startsWith("/allocations/");
-  const visibleNav = navItems.filter((item) => !item.adminOnly || user?.role === "admin");
+  const visibleNav = isPlatform ? [{ to: "/admin", label: "Client administration", icon: ShieldCheck, testid: "nav-admin" }] : navItems.filter((item) => !item.adminOnly || user?.role === "admin");
   const initials = (user?.name || user?.email || "JD")
     .split(/[ @.]/)
     .filter(Boolean)
@@ -55,7 +57,7 @@ export default function AppShell({ children }) {
   const notificationKey = `ebrr_notifications_seen_${user?.id || "anonymous"}`;
 
   const loadNotifications = async () => {
-    if (!user) return;
+    if (!user || isPlatform) return;
     setNotificationLoading(true);
     try {
       const [{ data: runs }, { data: audit }] = await Promise.all([
@@ -124,7 +126,7 @@ export default function AppShell({ children }) {
   };
 
   useEffect(() => {
-    if (!user) {
+    if (!user || isPlatform) {
       setNotifications([]);
       setNotificationCount(0);
       return undefined;
@@ -133,7 +135,7 @@ export default function AppShell({ children }) {
     const timer = setInterval(loadNotifications, 15000);
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id, location.pathname]);
+  }, [user?.id, user?.role, location.pathname]);
 
   useEffect(() => {
     const close = (event) => {
@@ -192,7 +194,7 @@ export default function AppShell({ children }) {
   return (
     <div className="eb-shell">
       <aside className="eb-sidebar">
-        <Link to="/dashboard" className="px-[50px] pt-[25px]" data-testid="brand-link">
+        <Link to={home} className="px-[50px] pt-[25px]" data-testid="brand-link">
           <BrandMark />
         </Link>
         <div className="mt-[25px] h-px bg-white/15" />
@@ -220,7 +222,7 @@ export default function AppShell({ children }) {
             </div>
             <div className="min-w-0 flex-1">
               <div className="truncate text-[16px] font-medium" data-testid="user-name">{user?.name || "John Doe"}</div>
-              <div className="mt-1 truncate text-[13px] text-[#0F172A]/60">{user?.role === "read_only" ? "Read-only" : user?.role === "user" ? "Standard User" : "Administrator"}</div>
+              <div className="mt-1 truncate text-[13px] text-[#0F172A]/60">{isPlatform ? "Platform administrator" : user?.role === "read_only" ? "Read-only" : user?.role === "user" ? "Standard User" : "Client administrator"}</div>
             </div>
             <button
               onClick={signOut}
@@ -237,7 +239,7 @@ export default function AppShell({ children }) {
       <main className="eb-main">
         <div className="lg:hidden border-b border-[#0F172A]/5 bg-white px-4 py-3">
           <div className="flex items-center justify-between gap-4">
-            <Link to="/dashboard"><BrandMark compact /></Link>
+            <Link to={home}><BrandMark compact /></Link>
             <button onClick={signOut} className="eb-button-secondary !h-10 !px-3 !text-sm" data-testid="sign-out-button-mobile">
               <LogOut className="h-4 w-4" />
             </button>

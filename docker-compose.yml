@@ -33,6 +33,7 @@ services:
       - ALLOW_DEFAULT_ADMIN=${ALLOW_DEFAULT_ADMIN:-}
       - ADMIN_EMAIL=${ADMIN_EMAIL:-}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      - PLATFORM_ADMIN_EMAIL=${PLATFORM_ADMIN_EMAIL:-}
 
   frontend:
     build:

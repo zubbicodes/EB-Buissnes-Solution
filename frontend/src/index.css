@@ -5,11 +5,14 @@
 
 body {
   margin: 0;
+  overflow-x: clip;
   font-family: 'IBM Plex Sans', system-ui, sans-serif;
   background: #F9F9FD;
   color: #0F172A;
   -webkit-font-smoothing: antialiased;
 }
+
+html { overflow-x: clip; }
 
 h1, h2, h3, h4, h5, .font-display {
   font-family: 'Outfit', system-ui, sans-serif;
@@ -240,6 +243,8 @@ h1, h2, h3, h4, h5, .font-display {
 
   .eb-title {
     @apply mt-[29px] font-display text-[32px] font-semibold leading-none tracking-normal text-[#0F172A] sm:text-[40px];
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
   .eb-description {
@@ -256,12 +261,12 @@ h1, h2, h3, h4, h5, .font-display {
 
   .eb-button,
   .gradient-cta {
-    @apply inline-flex h-[54px] items-center justify-center gap-2 rounded-[8px] px-6 text-[18px] font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50;
+    @apply inline-flex h-[54px] items-center justify-center gap-2 whitespace-nowrap rounded-[8px] px-6 text-[18px] font-medium text-white transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0F172A] focus-visible:ring-offset-2 active:opacity-80 disabled:cursor-not-allowed disabled:opacity-50;
     background: linear-gradient(135deg, #12B488 0%, #226CE0 100%);
   }
 
   .eb-button-secondary {
-    @apply inline-flex h-[54px] items-center justify-center gap-2 rounded-[8px] border border-[#0F172A]/10 bg-white px-6 text-[18px] font-medium text-[#0F172A] transition-colors hover:bg-[#F8FAFB] disabled:cursor-not-allowed disabled:opacity-50;
+    @apply inline-flex h-[54px] items-center justify-center gap-2 whitespace-nowrap rounded-[8px] border border-[#0F172A]/10 bg-white px-6 text-[18px] font-medium text-[#0F172A] transition-colors hover:bg-[#F8FAFB] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0F172A] focus-visible:ring-offset-2 active:bg-[#E2E8F0] disabled:cursor-not-allowed disabled:opacity-50;
   }
 
   .eb-help-button {
@@ -273,6 +278,13 @@ h1, h2, h3, h4, h5, .font-display {
   select.eb-input,
   textarea.eb-input {
     @apply h-[54px] rounded-[8px] border border-[#0F172A]/5 bg-[#F8FAFB] px-5 text-[16px] text-[#0F172A] outline-none transition focus:border-[#45AE8D] focus:ring-2 focus:ring-[#45AE8D]/20;
+  }
+
+  .eb-input:disabled,
+  input.eb-input:disabled,
+  select.eb-input:disabled,
+  textarea.eb-input:disabled {
+    @apply cursor-not-allowed opacity-50;
   }
 
   textarea.eb-input {

@@ -27,6 +27,16 @@ from collections import defaultdict
 from openpyxl import Workbook, load_workbook
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token as google_id_token
+try:
+    from .admin import (AdminService, ClientInput, ClientUpdate, MappingInput, MappingUpdate,
+                        InviteInput, AccessInput, LinkInput, RedeemInput, redeem_account_link)
+    from .client_mappings import propose_mapped_allocation
+    from .workspace_migration import migrate_legacy_workspaces
+except ImportError:
+    from admin import (AdminService, ClientInput, ClientUpdate, MappingInput, MappingUpdate,
+                       InviteInput, AccessInput, LinkInput, RedeemInput, redeem_account_link)
+    from client_mappings import propose_mapped_allocation
+    from workspace_migration import migrate_legacy_workspaces
 
 
 # ----- DB / Config -----
@@ -53,12 +63,12 @@ def hash_password(password: str) -> str:
 def verify_password(plain: str, hashed: str) -> bool:
     return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
 
-def create_access_token(user_id: str, email: str) -> str:
-    payload = {"sub": user_id, "email": email, "exp": datetime.now(timezone.utc) + timedelta(days=7), "type": "access"}
+def create_access_token(user_id: str, email: str, auth_version: int = 0) -> str:
+    payload = {"sub": user_id, "email": email, "ver": auth_version, "exp": datetime.now(timezone.utc) + timedelta(days=7), "type": "access"}
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
-def create_refresh_token(user_id: str) -> str:
-    payload = {"sub": user_id, "exp": datetime.now(timezone.utc) + timedelta(days=30), "type": "refresh"}
+def create_refresh_token(user_id: str, auth_version: int = 0) -> str:
+    payload = {"sub": user_id, "ver": auth_version, "exp": datetime.now(timezone.utc) + timedelta(days=30), "type": "refresh"}
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 def set_auth_cookies(response: Response, access: str, refresh: str):
@@ -67,6 +77,8 @@ def set_auth_cookies(response: Response, access: str, refresh: str):
 
 
 async def ensure_user_workspace(user: Dict[str, Any]) -> Dict[str, Any]:
+    if user.get("role") == "platform_admin":
+        return user
     if user.get("org_id") and user.get("role"):
         return user
     now = datetime.now(timezone.utc).isoformat()
@@ -88,26 +100,49 @@ async def ensure_user_workspace(user: Dict[str, Any]) -> Dict[str, Any]:
     user["role"] = role
     return user
 
-async def get_current_user(request: Request) -> Dict[str, Any]:
-    token = request.cookies.get("access_token")
-    if not token:
-        auth = request.headers.get("Authorization", "")
-        if auth.startswith("Bearer "):
-            token = auth[7:]
+async def check_account_access(user):
+    if not user.get("active", True) or user.get("account_state") == "invited":
+        raise HTTPException(403, "Account access is inactive or invitation has not been completed")
+    if user.get("role") != "platform_admin" and user.get("org_id") and hasattr(db, "organizations"):
+        org = await db.organizations.find_one({"id": user["org_id"]})
+        if not org or not org.get("active", True):
+            raise HTTPException(403, "Client access is inactive")
+
+
+async def get_identity(request: Request) -> Dict[str, Any]:
+    auth = request.headers.get("Authorization", "")
+    token = auth[7:] if auth.startswith("Bearer ") else request.cookies.get("access_token")
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         if payload.get("type") != "access":
             raise HTTPException(status_code=401, detail="Invalid token type")
-        user = await db.users.find_one({"id": payload["sub"]}, {"_id": 0, "password_hash": 0})
+        user = await db.users.find_one({"id": payload["sub"]}, {"_id": 0, "password_hash": 0, "account_link": 0, "history": 0})
         if not user:
             raise HTTPException(status_code=401, detail="User not found")
-        return await ensure_user_workspace(user)
+        if payload.get("ver", 0) != user.get("auth_version", 0):
+            raise HTTPException(401, "Session revoked; please sign in again")
+        user = await ensure_user_workspace(user)
+        await check_account_access(user)
+        return user
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
+
+
+async def get_current_user(request: Request) -> Dict[str, Any]:
+    user = await get_identity(request)
+    if user.get("role") == "platform_admin":
+        raise HTTPException(403, "Platform administrators cannot access client financial operations")
+    return user
+
+
+async def get_platform_admin(current=Depends(get_identity)):
+    if current.get("role") != "platform_admin":
+        raise HTTPException(403, "Platform administrator access required")
+    return current
 
 
 def require_role(current: Dict[str, Any], allowed: List[str]):
@@ -1060,7 +1095,7 @@ def _run_matching_legacy(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping
 # Conservative matcher v2. Kept separate from the legacy implementation above
 # so historical stored runs remain readable while every newly created run uses
 # this deterministic-first decision model.
-def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
+def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping, client_mappings=None):
     bank_rows = []
     for i, row in enumerate(bank_rows_raw):
         amount = to_float(row.get(mapping.bank_amount or "", "")) or 0.0
@@ -1223,6 +1258,9 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping):
                 set_no_match(bank, "Invoice reference identified, but the invoice has no available balance", evidence)
                 evidence["decision_reason"] = bank["reason"]
             bank["evidence"] = evidence
+            continue
+
+        if propose_mapped_allocation(bank, invoice_rows, client_mappings or [], fifo_plan, proposal_links):
             continue
 
         sources = debtor_sources(bank)
@@ -1422,13 +1460,15 @@ async def login(payload: LoginIn, response: Response):
     user = await db.users.find_one({"email": email})
     if not user or not user.get("password_hash") or not verify_password(payload.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid email or password")
+    user = await ensure_user_workspace(user)
+    await check_account_access(user)
     now = datetime.now(timezone.utc).isoformat()
     await db.users.update_one({"id": user["id"]}, {"$set": {"last_login_at": now, "updated_at": now}})
-    access = create_access_token(user["id"], email)
-    refresh = create_refresh_token(user["id"])
+    access = create_access_token(user["id"], email, user.get("auth_version", 0))
+    refresh = create_refresh_token(user["id"], user.get("auth_version", 0))
     set_auth_cookies(response, access, refresh)
     user = await ensure_user_workspace(user)
-    return {"id": user["id"], "email": user["email"], "name": user.get("name", ""), "org_id": user["org_id"], "role": user["role"], "access_token": access, "refresh_token": refresh}
+    return {"id": user["id"], "email": user["email"], "name": user.get("name", ""), "org_id": user.get("org_id"), "role": user["role"], "access_token": access, "refresh_token": refresh}
 
 
 @api.post("/auth/google")
@@ -1460,6 +1500,7 @@ async def google_auth(payload: GoogleAuthIn, response: Response):
     if user:
         user_id = user["id"]
         user = await ensure_user_workspace(user)
+        await check_account_access(user)
         update = {
             "auth_provider": "google",
             "google_sub": google_sub,
@@ -1471,7 +1512,7 @@ async def google_auth(payload: GoogleAuthIn, response: Response):
             update["name"] = name
         await db.users.update_one({"id": user_id}, {"$set": update})
         user_name = update.get("name") or user.get("name", "") or name
-        org_id = user["org_id"]
+        org_id = user.get("org_id")
         role = user["role"]
     else:
         user_id = str(uuid.uuid4())
@@ -1499,8 +1540,8 @@ async def google_auth(payload: GoogleAuthIn, response: Response):
         })
         role = "admin"
 
-    access = create_access_token(user_id, email)
-    refresh = create_refresh_token(user_id)
+    access = create_access_token(user_id, email, (user or {}).get("auth_version", 0))
+    refresh = create_refresh_token(user_id, (user or {}).get("auth_version", 0))
     set_auth_cookies(response, access, refresh)
     return {"id": user_id, "email": email, "name": user_name, "org_id": org_id, "role": role, "access_token": access, "refresh_token": refresh}
 
@@ -1521,22 +1562,85 @@ async def refresh_session(request: Request, response: Response):
         payload = jwt.decode(refresh, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         if payload.get("type") != "refresh":
             raise HTTPException(status_code=401, detail="Invalid token type")
-        user = await db.users.find_one({"id": payload["sub"]}, {"_id": 0, "password_hash": 0})
+        user = await db.users.find_one({"id": payload["sub"]}, {"_id": 0, "password_hash": 0, "account_link": 0, "history": 0})
         if not user:
             raise HTTPException(status_code=401, detail="User not found")
+        if payload.get("ver", 0) != user.get("auth_version", 0):
+            raise HTTPException(401, "Session revoked; please sign in again")
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Refresh token expired")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid refresh token")
-    access = create_access_token(user["id"], user["email"])
-    new_refresh = create_refresh_token(user["id"])
+    await check_account_access(user)
+    access = create_access_token(user["id"], user["email"], user.get("auth_version", 0))
+    new_refresh = create_refresh_token(user["id"], user.get("auth_version", 0))
     set_auth_cookies(response, access, new_refresh)
     return user
 
 
 @api.get("/auth/me")
-async def me(current=Depends(get_current_user)):
+async def me(current=Depends(get_identity)):
     return current
+
+
+@api.post("/auth/complete-account")
+async def complete_account(payload: RedeemInput):
+    return await redeem_account_link(db, payload, hash_password)
+
+
+@api.get("/admin/clients")
+async def admin_clients(current=Depends(get_platform_admin)):
+    return await AdminService(db, current).clients()
+
+
+@api.post("/admin/clients")
+async def admin_create_client(payload: ClientInput, current=Depends(get_platform_admin)):
+    return await AdminService(db, current).create_client(payload)
+
+
+@api.put("/admin/clients/{client_id}")
+async def admin_update_client(client_id: str, payload: ClientUpdate, current=Depends(get_platform_admin)):
+    return await AdminService(db, current).update_client(client_id, payload)
+
+
+@api.get("/admin/clients/{client_id}/users")
+async def admin_users(client_id: str, current=Depends(get_platform_admin)):
+    return await AdminService(db, current).users(client_id)
+
+
+@api.post("/admin/clients/{client_id}/invitations")
+async def admin_invite(client_id: str, payload: InviteInput, current=Depends(get_platform_admin)):
+    return await AdminService(db, current).invite(client_id, payload)
+
+
+@api.put("/admin/clients/{client_id}/users/{user_id}")
+async def admin_update_user(client_id: str, user_id: str, payload: AccessInput, current=Depends(get_platform_admin)):
+    return await AdminService(db, current).update_user(client_id, user_id, payload)
+
+
+@api.post("/admin/clients/{client_id}/users/{user_id}/links")
+async def admin_issue_link(client_id: str, user_id: str, payload: LinkInput, current=Depends(get_platform_admin)):
+    return await AdminService(db, current).issue_link(client_id, user_id, payload)
+
+
+@api.get("/admin/clients/{client_id}/mappings")
+async def admin_mappings(client_id: str, current=Depends(get_platform_admin)):
+    return await AdminService(db, current).mappings(client_id)
+
+
+@api.post("/admin/clients/{client_id}/mappings")
+async def admin_create_mapping(client_id: str, payload: MappingInput, current=Depends(get_platform_admin)):
+    return await AdminService(db, current).save_mapping(client_id, payload)
+
+
+@api.put("/admin/clients/{client_id}/mappings/{mapping_id}")
+async def admin_update_mapping(client_id: str, mapping_id: str, payload: MappingUpdate, current=Depends(get_platform_admin)):
+    return await AdminService(db, current).save_mapping(client_id, payload, mapping_id)
+
+
+@api.get("/admin/clients/{client_id}/history")
+async def admin_history(client_id: str, current=Depends(get_platform_admin)):
+    return await AdminService(db, current).history(client_id)
 
 
 # ----- CSV column-mapping presets (built-in) and saved profiles (per-user) -----
@@ -1810,7 +1914,7 @@ async def rebuild_exceptions(run_id: str, user_id: str, org_id: str):
     return len(docs)
 
 
-async def _process_run_async(run_id: str, user_id: str, org_id: str, bank_raw: List[Dict[str, str]], inv_raw: List[Dict[str, str]], mapping_dict: Dict[str, Any]):
+async def _process_run_async(run_id: str, user_id: str, org_id: str, bank_raw: List[Dict[str, str]], inv_raw: List[Dict[str, str]], mapping_dict: Dict[str, Any], client_mappings=None):
     """Background processor for large allocation runs."""
     try:
         await db.allocation_runs.update_one(
@@ -1821,7 +1925,7 @@ async def _process_run_async(run_id: str, user_id: str, org_id: str, bank_raw: L
         # Matching is CPU-heavy. Run it off the asyncio event loop so users,
         # audit, progress polling, and all other API endpoints remain responsive.
         bank_rows, invoice_rows, stats = await asyncio.to_thread(
-            run_matching, bank_raw, inv_raw, mapping
+            run_matching, bank_raw, inv_raw, mapping, client_mappings
         )
         await db.allocation_runs.update_one(
             {"id": run_id, "org_id": org_id},
@@ -1876,6 +1980,9 @@ async def create_allocation(payload: AllocationCreate, background: BackgroundTas
     is_large = bank_row_count > 2000 or invoice_row_count > 2000
 
     run_id = str(uuid.uuid4())
+    intelligence = await db.client_mappings.find(
+        {"org_id": current["org_id"], "active": True}, {"_id": 0, "history": 0}
+    ).to_list(None)
     base_doc = {
         "id": run_id,
         "user_id": current["id"],
@@ -1885,6 +1992,7 @@ async def create_allocation(payload: AllocationCreate, background: BackgroundTas
         "period": payload.period,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "mapping": payload.mapping.model_dump(),
+        "matching_mappings": intelligence,
         "status": "processing" if is_large else "done",
         "progress": 5 if is_large else 100,
         "progress_phase": "Queued for processing" if is_large else "Allocation complete",
@@ -1904,11 +2012,14 @@ async def create_allocation(payload: AllocationCreate, background: BackgroundTas
             {"name": payload.name, "period": payload.period, "bank_rows": bank_row_count, "invoice_rows": invoice_row_count},
             current["org_id"],
         )
-        background.add_task(_process_run_async, run_id, current["id"], current["org_id"], bank_raw, inv_raw, payload.mapping.model_dump())
-        doc = await db.allocation_runs.find_one({"id": run_id, "org_id": current["org_id"]}, {"_id": 0})
+        background.add_task(_process_run_async, run_id, current["id"], current["org_id"], bank_raw, inv_raw, payload.mapping.model_dump(), intelligence)
+        doc = await db.allocation_runs.find_one(
+            {"id": run_id, "org_id": current["org_id"]},
+            {"_id": 0, "matching_mappings": 0},
+        )
         return doc
 
-    bank_rows, invoice_rows, stats = run_matching(bank_raw, inv_raw, payload.mapping)
+    bank_rows, invoice_rows, stats = run_matching(bank_raw, inv_raw, payload.mapping, intelligence)
     enrich_matches(bank_rows, invoice_rows)
 
     doc = {**base_doc, "stats": stats}
@@ -1921,6 +2032,7 @@ async def create_allocation(payload: AllocationCreate, background: BackgroundTas
         "name": payload.name, "period": payload.period, "stats": stats,
     }, current["org_id"])
     doc.pop("_id", None)
+    doc.pop("matching_mappings", None)
     return doc
 
 
@@ -1928,7 +2040,7 @@ async def create_allocation(payload: AllocationCreate, background: BackgroundTas
 async def list_allocations(current=Depends(get_current_user)):
     runs = await db.allocation_runs.find(
         {"org_id": current["org_id"], "status": {"$ne": "archived"}},
-        {"_id": 0, "bank_rows": 0, "invoice_rows": 0},
+        {"_id": 0, "bank_rows": 0, "invoice_rows": 0, "matching_mappings": 0},
     ).sort("created_at", -1).to_list(500)
     return runs
 
@@ -1939,7 +2051,7 @@ async def get_allocation(run_id: str, current=Depends(get_current_user)):
     Use /allocations/{id}/rows for paginated row data."""
     run = await db.allocation_runs.find_one(
         {"id": run_id, "org_id": current["org_id"]},
-        {"_id": 0, "bank_rows": 0, "invoice_rows": 0},
+        {"_id": 0, "bank_rows": 0, "invoice_rows": 0, "matching_mappings": 0},
     )
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
@@ -2309,7 +2421,7 @@ async def reject_suggestion(run_id: str, bank_row_id: str, current=Depends(get_c
     bank = await db.allocation_bank_rows.find_one(row_query, {"_id": 0})
     if not bank:
         raise HTTPException(status_code=404, detail="Bank row not found")
-    if bank.get("decision") != "suggest" or not bank.get("suggestions"):
+    if bank.get("decision") != "suggest":
         raise HTTPException(status_code=409, detail="This suggestion is no longer pending")
     has_committed = bool(bank.get("matches"))
     new_status = "overpaid" if has_committed else "unmatched"
@@ -2695,8 +2807,8 @@ async def audit(run_id: Optional[str] = None, current=Depends(get_current_user))
 async def workspace_users(current=Depends(get_current_user)):
     require_role(current, ["admin"])
     users = await db.users.find(
-        {"org_id": current["org_id"]},
-        {"_id": 0, "password_hash": 0, "google_sub": 0},
+        {"org_id": current["org_id"], "role": {"$ne": "platform_admin"}},
+        {"_id": 0, "password_hash": 0, "google_sub": 0, "account_link": 0, "history": 0},
     ).sort("created_at", 1).to_list(200)
     org = await db.organizations.find_one({"id": current["org_id"]}, {"_id": 0})
     return {"organization": org, "users": users}
@@ -2710,13 +2822,13 @@ async def update_workspace_user(user_id: str, payload: WorkspaceUserUpdateIn, cu
         if admins <= 1:
             raise HTTPException(status_code=400, detail="At least one admin is required")
     res = await db.users.update_one(
-        {"id": user_id, "org_id": current["org_id"]},
+        {"id": user_id, "org_id": current["org_id"], "role": {"$ne": "platform_admin"}},
         {"$set": {"role": payload.role, "updated_at": datetime.now(timezone.utc).isoformat()}},
     )
     if res.matched_count == 0:
         raise HTTPException(status_code=404, detail="User not found")
     await write_audit(current["id"], None, "user_role_update", {"user_id": user_id, "role": payload.role}, current["org_id"])
-    user = await db.users.find_one({"id": user_id, "org_id": current["org_id"]}, {"_id": 0, "password_hash": 0, "google_sub": 0})
+    user = await db.users.find_one({"id": user_id, "org_id": current["org_id"]}, {"_id": 0, "password_hash": 0, "google_sub": 0, "account_link": 0, "history": 0})
     return user
 
 
@@ -2753,17 +2865,15 @@ async def startup():
     await db.audit_logs.create_index([("user_id", 1), ("created_at", -1)])
     await db.audit_logs.create_index([("org_id", 1), ("created_at", -1)])
     await db.exceptions.create_index([("run_id", 1), ("org_id", 1), ("type", 1), ("status", 1)])
+    await db.client_mappings.create_index([("org_id", 1), ("kind", 1), ("source_normalized", 1)], unique=True)
+    await db.client_mappings.create_index([("org_id", 1), ("active", 1)])
+    await db.users.create_index("account_link.hash", sparse=True)
+    await migrate_legacy_workspaces(db, DEFAULT_ORG_NAME)
     default_org = await db.organizations.find_one({"name": DEFAULT_ORG_NAME})
     if not default_org:
         default_org = {"id": str(uuid.uuid4()), "name": DEFAULT_ORG_NAME, "created_at": datetime.now(timezone.utc).isoformat()}
         await db.organizations.insert_one(default_org)
     default_org_id = default_org["id"]
-    await db.users.update_many({"org_id": {"$exists": False}}, {"$set": {"org_id": default_org_id, "role": "admin"}})
-    await db.allocation_runs.update_many({"org_id": {"$exists": False}}, {"$set": {"org_id": default_org_id}})
-    await db.allocation_bank_rows.update_many({"org_id": {"$exists": False}}, {"$set": {"org_id": default_org_id}})
-    await db.allocation_invoice_rows.update_many({"org_id": {"$exists": False}}, {"$set": {"org_id": default_org_id}})
-    await db.audit_logs.update_many({"org_id": {"$exists": False}}, {"$set": {"org_id": default_org_id}})
-    await db.user_mapping_profiles.update_many({"org_id": {"$exists": False}}, {"$set": {"org_id": default_org_id}})
     # Seed admin
     admin_email = (os.environ.get("ADMIN_EMAIL") or "admin@ebbusiness.com").lower()
     admin_password = os.environ.get("ADMIN_PASSWORD") or "Admin@2026!"
@@ -2779,6 +2889,18 @@ async def startup():
             "created_at": datetime.now(timezone.utc).isoformat(),
         })
         logger.info(f"Seeded admin: {admin_email}")
+
+    # Explicit operator bootstrap only; public registration can never grant this role.
+    platform_email = os.environ.get("PLATFORM_ADMIN_EMAIL", "").strip().lower()
+    if platform_email:
+        operator = await db.users.find_one({"email": platform_email})
+        if not operator:
+            raise RuntimeError("PLATFORM_ADMIN_EMAIL must identify an existing dedicated operator account")
+        if operator.get("role") != "platform_admin":
+            await db.users.update_one({"id": operator["id"]}, {
+                "$set": {"role": "platform_admin", "active": True},
+                "$inc": {"auth_version": 1}, "$unset": {"account_link": ""}})
+            logger.info("Dedicated platform administrator enabled")
 
 
 @app.on_event("shutdown")

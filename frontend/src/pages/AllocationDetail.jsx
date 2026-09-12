@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback } from "react";
 import { useParams, Link } from "react-router-dom";
 import { api, fmtGBP, formatError, downloadAuthed } from "@/lib/api";
 import { toast } from "sonner";
+import { useAuth } from "@/context/AuthContext";
 import { ArrowLeft, Download, Link2, AlertTriangle, FileSpreadsheet, ChevronLeft, ChevronRight, Search, Eye, ArrowRight, PoundSterling, CheckCircle2, XCircle, FileText } from "lucide-react";
 
 const TABS = [
@@ -23,6 +24,7 @@ const CONF_COLOUR = {
 const PAGE_SIZE = 50;
 
 export default function AllocationDetail() {
+  const { user } = useAuth();
   const { id } = useParams();
   const [run, setRun] = useState(null);
   const [tab, setTab] = useState("full");
@@ -280,7 +282,9 @@ export default function AllocationDetail() {
       {review && (
         <ReviewPanel
           bank={review}
+          canEdit={user?.role !== "read_only"}
           busy={reviewBusy}
+          onManual={() => { setLinkDialog({ bankId: review.id, bank: review }); setReview(null); }}
           onAccept={() => reviewSuggestion("accept", review)}
           onReject={() => reviewSuggestion("reject", review)}
           onClose={() => setReview(null)}
@@ -476,7 +480,7 @@ function BankTable({ rows, showLink, onLink, onReview }) {
   );
 }
 
-function ReviewPanel({ bank, onClose, onAccept, onReject, busy }) {
+function ReviewPanel({ bank, onClose, onAccept, onReject, onManual, canEdit, busy }) {
   if (!bank) return null;
   const matches = bank.matches || [];
   const suggestions = bank.suggestions || [];
@@ -522,6 +526,11 @@ function ReviewPanel({ bank, onClose, onAccept, onReject, busy }) {
             <ReviewLine label="Debtor evidence" value={<span>{(evidence.debtor_match_type || "none").replaceAll("_", " ")}{evidence.debtor_score != null ? ` · ${evidence.debtor_score}%` : ""}</span>} />
             <ReviewLine label="Candidate margin" value={<span>{evidence.candidate_margin != null ? `${evidence.candidate_margin} points` : "Not applicable"}</span>} />
             <ReviewLine label="Amount evidence" value={<span>{(evidence.amount_evidence || "none").replaceAll("_", " ")}</span>} />
+            {evidence.mapping_ids?.length > 0 && <>
+              <ReviewLine label="Mapping evidence" value={<span>{evidence.mapping_sources?.join(", ")} → {evidence.mapped_debtors?.join(", ")}</span>} />
+              <ReviewLine label="Mapping versions" value={<span>{evidence.mapping_ids.map((mappingId, index) => `${mappingId} · v${evidence.mapping_versions?.[index]}`).join("; ")}</span>} />
+              <ReviewLine label="Mapping permission" value={<span>{evidence.fifo_permitted ? "FIFO proposal; confirmation required" : "Identification only"}</span>} />
+            </>}
             <ReviewLine label="Extracted references" value={
               (bank.extracted_refs && bank.extracted_refs.length)
                 ? <span className="font-mono">{bank.extracted_refs.join(", ")}</span>
@@ -588,12 +597,13 @@ function ReviewPanel({ bank, onClose, onAccept, onReject, busy }) {
             </div>
           )}
         </div>
-        {suggestions.length > 0 && (
+        {bank.decision === "suggest" && canEdit && (
           <div className="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end" data-testid="suggestion-actions">
             <button onClick={onReject} disabled={busy} className="eb-button-secondary disabled:opacity-50" data-testid="reject-suggestion">
               {busy ? "Saving…" : "Reject suggestion"}
             </button>
-            <button onClick={onAccept} disabled={busy} className="eb-button disabled:opacity-50" data-testid="accept-suggestion">
+            {!suggestions.length && <button onClick={onManual} disabled={busy} className="eb-button-secondary">Choose invoice</button>}
+            <button onClick={onAccept} disabled={busy || !suggestions.length} title={!suggestions.length ? "No invoice proposal is available. Use manual allocation to select an invoice." : undefined} className="eb-button disabled:opacity-50" data-testid="accept-suggestion">
               {busy ? "Saving…" : "Accept suggestion"}
             </button>
           </div>
