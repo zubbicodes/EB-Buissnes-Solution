@@ -529,7 +529,13 @@ function ReviewPanel({ bank, onClose, onAccept, onReject, onManual, canEdit, bus
             {evidence.mapping_ids?.length > 0 && <>
               <ReviewLine label="Mapping evidence" value={<span>{evidence.mapping_sources?.join(", ")} → {evidence.mapped_debtors?.join(", ")}</span>} />
               <ReviewLine label="Mapping versions" value={<span>{evidence.mapping_ids.map((mappingId, index) => `${mappingId} · v${evidence.mapping_versions?.[index]}`).join("; ")}</span>} />
-              <ReviewLine label="Mapping permission" value={<span>{evidence.fifo_permitted ? "FIFO proposal; confirmation required" : "Identification only"}</span>} />
+              <ReviewLine label="Mapping permission" value={<span>{
+                evidence.fifo_auto_permitted
+                  ? "FIFO auto-allocation permitted"
+                  : evidence.fifo_permitted
+                    ? "FIFO proposal; confirmation required"
+                    : "Identification only"
+              }</span>} />
             </>}
             <ReviewLine label="Extracted references" value={
               (bank.extracted_refs && bank.extracted_refs.length)

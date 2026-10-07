@@ -39,7 +39,7 @@ class MappingInput(StrictInput):
     kind: Literal["payer", "alias", "reference"]
     source_value: str = Field(min_length=2, max_length=240)
     debtor_name: str = Field(min_length=1, max_length=240)
-    allocation_mode: Literal["identify", "fifo"] = "identify"
+    allocation_mode: Literal["identify", "fifo", "fifo_auto"] = "identify"
     active: bool = True
     notes: str = Field(default="", max_length=2000)
     source: str = Field(min_length=1, max_length=240)

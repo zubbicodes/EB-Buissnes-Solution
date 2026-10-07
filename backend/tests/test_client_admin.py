@@ -246,6 +246,34 @@ def test_mapping_run_proposals_snapshot_deactivation_and_isolation(monkeypatch):
     run_scenario(monkeypatch, scenario)
 
 
+def test_fifo_auto_mapping_api_commits_and_keeps_exception_handling(monkeypatch):
+    async def scenario(api, db):
+        automatic = {**MAPPING, "allocation_mode": "fifo_auto"}
+        created = await api.post(
+            "/api/admin/clients/client-a/mappings",
+            headers=headers(OPERATOR),
+            json=automatic,
+        )
+        assert created.status_code == 200, created.text
+        result = await api.post("/api/allocations", headers=headers(CLIENT_USER), json=RUN)
+        assert result.status_code == 200, result.text
+        run = result.json()
+        bank = await db.allocation_bank_rows.find_one({"run_id": run["id"]})
+        invoices = await db.allocation_invoice_rows.find({"run_id": run["id"]}).sort("idx", 1).to_list(None)
+        assert bank["decision"] == "auto_match" and bank["status"] == "full"
+        assert bank["remaining"] == 0 and bank["suggestions"] == []
+        assert [link["amount"] for link in bank["matches"]] == [100, 25]
+        assert [invoice["remaining"] for invoice in invoices] == [0, 25]
+        assert run["stats"]["total_allocated"] == 125
+        exceptions = (await api.get("/api/exceptions", headers=headers(CLIENT_USER))).json()["rows"]
+        assert any(item["type"] == "underpayment" and item.get("invoice_number") == "INV1002" for item in exceptions)
+        feed = await api.get("/api/notifications", headers=headers(CLIENT_USER), params={"limit": 5})
+        assert feed.status_code == 200, feed.text
+        assert len(feed.json()["logs"]) <= 5
+        assert any(item["id"] == run["id"] for item in feed.json()["runs"])
+    run_scenario(monkeypatch, scenario)
+
+
 def test_background_run_uses_queued_mapping_snapshot(monkeypatch):
     async def scenario(api, db):
         mapping = (await api.post("/api/admin/clients/client-a/mappings", headers=headers(OPERATOR), json=MAPPING)).json()
@@ -286,6 +314,129 @@ def test_mapping_permissions_never_commit_balances(mode, expected_links):
     assert len(bank[0]["suggestions"]) == expected_links
     assert bank[0]["remaining"] == 125 and bank[0]["matches"] == []
     assert [row["remaining"] for row in invoices] == [100, 50]
+
+
+def test_mapping_schema_accepts_fifo_auto_permission():
+    payload = server.MappingInput(**{**MAPPING, "allocation_mode": "fifo_auto"})
+    assert payload.allocation_mode == "fifo_auto"
+
+
+def test_fifo_auto_mapping_commits_oldest_invoices_and_records_evidence():
+    mapping = {**MAPPING, "id": "map", "revision": 3, "allocation_mode": "fifo_auto"}
+    bank, invoices, stats = server.run_matching(
+        server.parse_csv(RUN["bank_csv"]),
+        server.parse_csv(RUN["invoice_csv"]),
+        server.ColumnMapping(**RUN["mapping"]),
+        [mapping],
+    )
+    row = bank[0]
+    assert row["decision"] == "auto_match" and row["status"] == "full"
+    assert row["suggestions"] == [] and row["remaining"] == 0
+    assert [link["amount"] for link in row["matches"]] == [100, 25]
+    server.enrich_matches(bank, invoices)
+    assert [link["invoice_number"] for link in row["matches"]] == ["INV1001", "INV1002"]
+    assert all(link["method"] == "client_mapping" for link in row["matches"])
+    assert all(link["mapping_evidence"] == [{"id": "map", "revision": 3}] for link in row["matches"])
+    assert row["evidence"]["mapping_allocation_mode"] == "fifo_auto"
+    assert row["evidence"]["fifo_auto_permitted"] is True
+    assert [invoice["remaining"] for invoice in invoices] == [0, 25]
+    assert stats["fully_matched"] == 1 and stats["suggested_matches"] == 0
+    assert stats["total_allocated"] == 125
+
+
+def test_fifo_auto_mapping_preserves_overpayment_balance():
+    mapping = {**MAPPING, "id": "map", "revision": 1, "allocation_mode": "fifo_auto"}
+    bank_rows = server.parse_csv("Ref,Amount\nZQ REMIT,200\n")
+    bank, invoices, stats = server.run_matching(
+        bank_rows,
+        server.parse_csv(RUN["invoice_csv"]),
+        server.ColumnMapping(**RUN["mapping"]),
+        [mapping],
+    )
+    assert bank[0]["status"] == "overpaid" and bank[0]["decision"] == "auto_match"
+    assert bank[0]["remaining"] == 50 and bank[0]["overpaid_amount"] == 50
+    assert [invoice["remaining"] for invoice in invoices] == [0, 0]
+    assert stats["total_allocated"] == 150 and stats["overpaid"] == 1
+
+
+def test_fifo_auto_mapping_with_no_open_balance_stays_unmatched():
+    mapping = {**MAPPING, "id": "map", "revision": 1, "allocation_mode": "fifo_auto"}
+    invoices = server.parse_csv("Inv,Debtor,Amount,Outstanding,Date\nINV1001,Acme Group,100,0,2026-01-01\n")
+    columns = server.ColumnMapping(**{**RUN["mapping"], "invoice_outstanding": "Outstanding"})
+    bank, invoice_rows, stats = server.run_matching(server.parse_csv(RUN["bank_csv"]), invoices, columns, [mapping])
+    assert bank[0]["status"] == "unmatched" and bank[0]["decision"] == "no_match"
+    assert bank[0]["matches"] == [] and bank[0]["suggestions"] == []
+    assert bank[0]["evidence"]["amount_evidence"] == "no_open_balance"
+    assert invoice_rows[0]["remaining"] == 0 and stats["total_allocated"] == 0
+
+
+def test_overlapping_mapping_permissions_use_most_restrictive_mode():
+    mappings = [
+        {**MAPPING, "id": "auto", "revision": 1, "allocation_mode": "fifo_auto"},
+        {**MAPPING, "id": "review", "revision": 1, "kind": "reference", "allocation_mode": "fifo"},
+    ]
+    bank, invoices, stats = server.run_matching(
+        server.parse_csv(RUN["bank_csv"]),
+        server.parse_csv(RUN["invoice_csv"]),
+        server.ColumnMapping(**RUN["mapping"]),
+        mappings,
+    )
+    assert bank[0]["decision"] == "suggest" and len(bank[0]["suggestions"]) == 2
+    assert bank[0]["matches"] == [] and bank[0]["evidence"]["mapping_allocation_mode"] == "fifo"
+    assert [invoice["remaining"] for invoice in invoices] == [100, 50]
+    assert stats["total_allocated"] == 0
+
+
+def test_overlapping_fifo_auto_mappings_for_same_debtor_can_commit():
+    source = "SHACKLETONS GARDEN/EREF/NOTPROVIDED/KREF/SHACKLETONS/REMI/SHACKL"
+    mappings = [
+        {**MAPPING, "id": "shackletons-payer", "revision": 2, "kind": "payer",
+         "source_value": source, "debtor_name": "SHACKLETONS HOME AND GARDEN (MIN)", "allocation_mode": "fifo_auto"},
+        {**MAPPING, "id": "shackletons-alias", "revision": 1, "kind": "alias",
+         "source_value": source, "debtor_name": "SHACKLETONS HOME AND GARDEN (MIN)", "allocation_mode": "fifo_auto"},
+    ]
+    bank_rows = [{"Ref": "C3/000006592", "Payer": source, "Amount": "125"}]
+    invoice_rows = [
+        {"Inv": "1565575", "Debtor": "SHACKLETONS HOME AND GARDEN (MIN)", "Amount": "100", "Date": "2025-07-18"},
+        {"Inv": "1568425", "Debtor": "SHACKLETONS HOME AND GARDEN (MIN)", "Amount": "50", "Date": "2025-08-01"},
+    ]
+    columns = server.ColumnMapping(**{**RUN["mapping"], "bank_payer": "Payer"})
+    bank, invoices, stats = server.run_matching(bank_rows, invoice_rows, columns, mappings)
+    assert bank[0]["decision"] == "auto_match" and bank[0]["status"] == "full"
+    assert [link["amount"] for link in bank[0]["matches"]] == [100, 25]
+    assert bank[0]["evidence"]["mapping_ids"] == ["shackletons-payer", "shackletons-alias"]
+    assert [invoice["remaining"] for invoice in invoices] == [0, 25]
+    assert stats["total_allocated"] == 125
+
+
+@pytest.mark.parametrize("narrative_field", ["reference", "payer"])
+def test_reference_variation_matches_phrase_inside_changing_bank_narrative(narrative_field):
+    mapping = {
+        **MAPPING,
+        "id": "share-map",
+        "revision": 2,
+        "kind": "reference",
+        "source_value": "A. Share . Sons Limited",
+        "debtor_name": "A SHARE & SONS T/A SCS",
+        "allocation_mode": "fifo",
+    }
+    bank_row = {
+        "Ref": "BANK-TRANSFER",
+        "Payer": "",
+        "Amount": "75",
+    }
+    bank_row["Ref" if narrative_field == "reference" else "Payer"] = (
+        "A. Share . Sons Limited/EREF/1155126087/UETR/"
+        "8f3926f1-changing-transaction-data"
+    )
+    invoice_rows = [{"Inv": "SCS-1", "Debtor": "A SHARE & SONS T/A SCS", "Amount": "75", "Date": "2026-01-01"}]
+    column_mapping = server.ColumnMapping(**{**RUN["mapping"], "bank_payer": "Payer"})
+    bank, invoices, stats = server.run_matching([bank_row], invoice_rows, column_mapping, [mapping])
+    assert bank[0]["decision"] == "suggest"
+    assert bank[0]["evidence"]["debtor_match_type"] == "client_mapping"
+    assert bank[0]["evidence"]["mapping_ids"] == ["share-map"]
+    assert len(bank[0]["suggestions"]) == 1 and bank[0]["matches"] == []
+    assert invoices[0]["remaining"] == 75 and stats["total_allocated"] == 0
 
 
 def test_conflicting_mapping_targets_require_manual_review():

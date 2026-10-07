@@ -7,6 +7,11 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } f
 
 const roles = { admin: "Client admin", user: "User", read_only: "Read-only" };
 const kinds = { payer: "Payer / remitter", alias: "Company alias", reference: "Reference variation" };
+const allocationModes = {
+  identify: "Identification only",
+  fifo: "FIFO proposals permitted",
+  fifo_auto: "FIFO auto-allocation permitted",
+};
 const tabs = ["Mappings", "Users", "Client settings", "History"];
 const emptyMapping = { kind: "payer", source_value: "", debtor_name: "", allocation_mode: "identify", active: true, notes: "", source: "", reason: "" };
 
@@ -103,7 +108,7 @@ export default function Admin() {
         action={<button className="eb-button" onClick={() => open("client")}><Plus className="h-4 w-4" />New client</button>} />
       <div className="flex items-start gap-3 rounded-lg border bg-card p-4 text-sm text-muted-foreground">
         <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-secondary" />
-        <p>Client users own their financial data and allocations. All mapping-assisted allocations require their confirmation.</p>
+        <p>Client users own their financial data and allocations. Mapping permissions control whether FIFO allocations require review or may be applied automatically.</p>
       </div>
       <Field label="Selected client"><select aria-label="Selected client" className="eb-input w-full" value={clientId} onChange={(e) => switchClient(e.target.value)}>
         {!clients.length && <option value="">No clients yet</option>}
@@ -122,12 +127,12 @@ export default function Admin() {
             <p className="text-sm text-muted-foreground">Deactivating a client blocks its users from signing in or using existing sessions. Stored financial records are retained.</p>
             <button className="eb-button-secondary" onClick={() => open("client", client)}><Pencil className="h-4 w-4" />Edit client</button>
           </div> : <>
-            {tab === "Mappings" && <><div className="flex flex-wrap items-center justify-between gap-3"><p className="max-w-xl text-sm text-muted-foreground">Match complete payer names, aliases or reference phrases. FIFO permission allows a proposal across the oldest invoices; it never accepts it automatically.</p><button className="eb-button" onClick={() => open("mapping")}><Plus className="h-4 w-4" />Add mapping</button></div></>}
+            {tab === "Mappings" && <><div className="flex flex-wrap items-center justify-between gap-3"><p className="max-w-xl text-sm text-muted-foreground">Match complete payer names, aliases or phrases within longer bank narratives. Choose whether FIFO is identified, proposed for review, or allocated automatically.</p><button className="eb-button" onClick={() => open("mapping")}><Plus className="h-4 w-4" />Add mapping</button></div></>}
             {tab === "Users" && <button className="eb-button" disabled={client.active === false} onClick={() => open("invite")}><Plus className="h-4 w-4" />Invite user</button>}
             {loading ? <p role="status">Loading {tab.toLowerCase()}…</p> : !data.length ? <p className="rounded-lg border border-dashed p-8 text-center text-muted-foreground">No {tab.toLowerCase()} for this client yet.</p> :
               tab === "Mappings" ? <div className="grid gap-3">{data.map((m) => <article key={m.id} className="min-w-0 rounded-lg border bg-card p-4">
                 <div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0 flex-1"><p className="text-xs text-muted-foreground">{kinds[m.kind]}</p><h3 className="mt-1 break-words font-semibold">{m.source_value}</h3><p className="mt-1 break-words text-sm">Debtor: {m.debtor_name}</p></div><button className="eb-button-secondary !h-9 !px-3" aria-label={`Edit mapping ${m.source_value}`} onClick={() => open("mapping", m)}><Pencil className="h-4 w-4" />Edit</button></div>
-                <div className="mt-3 flex flex-wrap items-center gap-3 text-xs"><Status active={m.active} /><span>{m.allocation_mode === "fifo" ? "FIFO proposals permitted" : "Identification only"}</span><span className="text-muted-foreground">Version {m.revision}</span></div>
+                <div className="mt-3 flex flex-wrap items-center gap-3 text-xs"><Status active={m.active} /><span>{allocationModes[m.allocation_mode] || allocationModes.identify}</span><span className="text-muted-foreground">Version {m.revision}</span></div>
                 <p className="mt-3 break-words text-xs text-muted-foreground">Source: {m.source}</p>{m.notes && <p className="mt-2 break-words text-sm">{m.notes}</p>}
               </article>)}</div> : tab === "Users" ? <div className="grid gap-3">{data.map((u) => <article key={u.id} className="rounded-lg border bg-card p-4">
                 <div className="flex flex-wrap justify-between gap-3"><div className="min-w-0"><h3 className="break-words font-semibold">{u.name}</h3><p className="break-all text-sm text-muted-foreground">{u.email}</p></div><Status active={u.active !== false} /></div>
@@ -171,10 +176,11 @@ function Editor({ kind, record, busy, onSave, onCancel }) {
       {kind === "link" && <p className="break-words text-sm">Create a new {values.purpose === "invite" ? "invitation" : "password reset"} for {record.email}. You will receive a secure link to share manually.</p>}
       {kind === "mapping" && <>
         <Field label="Mapping type">{select("kind", kinds)}</Field>
-        <Field label="Payer, alias or reference phrase" hint="Matches a complete phrase after normalizing case, punctuation and spacing.">{input("source_value", { minLength: 2, maxLength: 240 })}</Field>
+        <Field label="Payer, alias or reference phrase" hint="Matches this complete phrase within the imported payer or narrative after normalizing case, punctuation and spacing.">{input("source_value", { minLength: 2, maxLength: 240 })}</Field>
         <Field label="Debtor name" hint="Use the debtor name as it appears in this client's invoice listing.">{input("debtor_name", { maxLength: 240 })}</Field>
-        <Field label="Allocation permission">{select("allocation_mode", { identify: "Identification only", fifo: "FIFO proposals permitted" })}</Field>
-        <p className="text-xs text-muted-foreground">Identification-only mappings may propose a single unambiguous invoice. FIFO may propose multiple invoices in oldest-first order. Both require client confirmation.</p>
+        <Field label="Allocation permission">{select("allocation_mode", allocationModes)}</Field>
+        <p className="text-xs text-muted-foreground">Identification-only mappings may propose one unambiguous invoice. FIFO proposals require client confirmation. FIFO auto-allocation immediately applies the payment to the debtor's oldest open invoices and retains normal balance and exception safeguards.</p>
+        {values.allocation_mode === "fifo_auto" && <p className="rounded-md border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">Use automatic FIFO only after the client has confirmed that this payer or reference reliably identifies the selected debtor. Saving the mapping records the source and reason below.</p>}
         <Field label="Source" hint="For example: client confirmation, remittance advice, or a support reference.">{input("source", { maxLength: 240 })}</Field>
         <Field label="Notes (optional)"><textarea className="eb-input min-h-20 w-full" maxLength={2000} value={values.notes} onChange={(e) => setValues({ ...values, notes: e.target.value })} /></Field>
       </>}

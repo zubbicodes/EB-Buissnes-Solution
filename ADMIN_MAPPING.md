@@ -41,16 +41,21 @@ These mappings are separate from the existing **CSV column-mapping presets**.
 
 Each mapping records the client, source phrase, target debtor name, type (payer/remitter, alias, reference variation), allocation permission, active status, notes, source, and change reason. Use the debtor name from that client's invoice listing.
 
-Source matching uses complete phrases with case, punctuation and whitespace normalization. Payer mappings inspect the payer field; reference variations inspect the bank reference; aliases inspect either. Conflicting mapped debtors require manual review. Overlapping mappings use the more restrictive permission.
+Source matching uses complete phrases with case, punctuation and whitespace normalization. The phrase may appear within a wider bank narrative, so changing transaction data after it (for example EREF or UETR values) does not prevent a match. Payer mappings inspect the payer field. Reference variations and aliases inspect both imported reference/narrative and payer/remitter fields because banks place narrative data in different columns. Conflicting mapped debtors require manual review. Overlapping mappings use the more restrictive permission.
 
-**All mapping-assisted allocations remain suggestions.**
+Mapping-assisted behavior is controlled explicitly per mapping:
 
 - **Identification only:** identify the debtor and propose one invoice only when there is a single open candidate or exactly one open invoice matching the payment amount. Otherwise the client selects an invoice manually.
 - **FIFO proposals permitted:** propose allocation across that debtor's oldest open invoices. No bank or invoice balance changes until the client accepts the suggestion.
+- **FIFO auto-allocation permitted:** immediately allocate across that debtor's oldest open invoices. This is intended only for payer/reference relationships the client has approved as trusted. Normal balance handling, exception generation, audit data, mapping evidence, organization scoping, and invoice-reference precedence still apply.
+- If overlapping mappings for the same debtor have different permissions, the most restrictive permission wins. Automatic FIFO therefore occurs only when every matching mapping permits it.
+- Mappings that identify different debtors are ambiguous and never allocate automatically.
 - Existing invoice-reference matching keeps precedence. Existing matching behavior is otherwise unchanged when no active mapping applies.
 - Only active mappings for the authenticated client's organization are loaded. Browser-supplied client IDs are not used for allocation creation.
 - Both synchronous and background runs use a snapshot captured when the client creates the run. Editing/deactivating a mapping does not recalculate past runs or alter completed allocations.
-- Run snapshots and row evidence retain mapping IDs and revisions. The allocation review panel shows the source, debtor, permission, and mapping versions.
+- Run snapshots and row evidence retain mapping IDs and revisions. The allocation review panel shows the source, debtor, effective permission, and mapping versions.
+
+Active mappings and target debtors are normalized and indexed once per allocation run. This avoids rescanning and renormalizing the complete invoice listing for every mapped bank row.
 
 ## Audit and concurrent edits
 

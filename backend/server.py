@@ -31,12 +31,12 @@ from google.oauth2 import id_token as google_id_token
 try:
     from .admin import (AdminService, ClientInput, ClientUpdate, MappingInput, MappingUpdate,
                         InviteInput, AccessInput, LinkInput, RedeemInput, redeem_account_link)
-    from .client_mappings import propose_mapped_allocation
+    from .client_mappings import normalize_label, prepare_mappings, propose_mapped_allocation
     from .workspace_migration import migrate_legacy_workspaces
 except ImportError:
     from admin import (AdminService, ClientInput, ClientUpdate, MappingInput, MappingUpdate,
                        InviteInput, AccessInput, LinkInput, RedeemInput, redeem_account_link)
-    from client_mappings import propose_mapped_allocation
+    from client_mappings import normalize_label, prepare_mappings, propose_mapped_allocation
     from workspace_migration import migrate_legacy_workspaces
 
 
@@ -606,14 +606,17 @@ def fuzzy_overlap_allowed(source: str, debtor: str) -> bool:
     )
 
 
-def fifo_plan(amount: float, invoices: List[Dict[str, Any]]) -> Dict[str, Any]:
+def fifo_plan(amount: float, invoices: List[Dict[str, Any]], presorted: bool = False) -> Dict[str, Any]:
     """Plan allocations without mutating invoice or bank balances."""
     remaining = round(max(float(amount or 0), 0), 2)
     links = []
     exact_whole_invoices = True
-    for inv in sorted((i for i in invoices if i.get("remaining", 0) > 0.005), key=invoice_fifo_key):
+    ordered = invoices if presorted else sorted(invoices, key=invoice_fifo_key)
+    for inv in ordered:
         if remaining <= 0.005:
             break
+        if inv.get("remaining", 0) <= 0.005:
+            continue
         before = round(float(inv["remaining"]), 2)
         allocation = round(min(remaining, before), 2)
         if allocation <= 0:
@@ -1113,6 +1116,7 @@ def _run_matching_legacy(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping
 # so historical stored runs remain readable while every newly created run uses
 # this deterministic-first decision model.
 def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping, client_mappings=None):
+    client_mappings = prepare_mappings(client_mappings)
     bank_rows = []
     for i, row in enumerate(bank_rows_raw):
         amount = to_float(row.get(mapping.bank_amount or "", "")) or 0.0
@@ -1147,6 +1151,7 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping, client
     inv_by_norm: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     inv_by_digit_suffix: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     debtor_groups: Dict[str, Dict[str, Any]] = {}
+    mapped_invoices_by_debtor: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for invoice in invoice_rows:
         if invoice["number_norm"]:
             inv_by_norm[invoice["number_norm"]].append(invoice)
@@ -1157,6 +1162,10 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping, client
         if norm:
             group = debtor_groups.setdefault(norm, {"norm": norm, "label": invoice["debtor"], "invoices": []})
             group["invoices"].append(invoice)
+        mapped_invoices_by_debtor[normalize_label(invoice.get("debtor"))].append(invoice)
+
+    for invoices in mapped_invoices_by_debtor.values():
+        invoices.sort(key=invoice_fifo_key)
 
     group_token_index: Dict[str, set] = defaultdict(set)
     for norm, group in debtor_groups.items():
@@ -1277,7 +1286,7 @@ def run_matching(bank_rows_raw, invoice_rows_raw, mapping: ColumnMapping, client
             bank["evidence"] = evidence
             continue
 
-        if propose_mapped_allocation(bank, invoice_rows, client_mappings or [], fifo_plan, proposal_links):
+        if propose_mapped_allocation(bank, mapped_invoices_by_debtor, client_mappings, fifo_plan, proposal_links, commit_plan):
             continue
 
         sources = debtor_sources(bank)
@@ -1882,6 +1891,7 @@ async def rebuild_exceptions(run_id: str, user_id: str, org_id: str):
     docs: List[Dict[str, Any]] = []
     bank_rows = await load_all_bank_rows(run_id, org_id)
     invoice_rows = await load_all_invoice_rows(run_id, org_id)
+    bank_by_id = {row["id"]: row for row in bank_rows}
 
     seen_payments: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for b in bank_rows:
@@ -1942,6 +1952,20 @@ async def rebuild_exceptions(run_id: str, user_id: str, org_id: str):
             docs.append({
                 "id": str(uuid.uuid4()), "org_id": org_id, "user_id": user_id, "run_id": run_id,
                 "type": "unmatched_invoice", "status": "open", "invoice_row_id": inv["id"],
+                "debtor": inv.get("debtor"), "invoice_number": inv.get("number"), "amount": inv.get("remaining"),
+                "confidence": None, "notes": "", "created_at": now,
+            })
+        elif (
+            inv.get("status") == "partial"
+            and float(inv.get("remaining") or 0) > 0.005
+            and not any(
+                bank_by_id.get(match.get("bank_id"), {}).get("status") == "partial"
+                for match in inv.get("matches", [])
+            )
+        ):
+            docs.append({
+                "id": str(uuid.uuid4()), "org_id": org_id, "user_id": user_id, "run_id": run_id,
+                "type": "underpayment", "status": "open", "invoice_row_id": inv["id"],
                 "debtor": inv.get("debtor"), "invoice_number": inv.get("number"), "amount": inv.get("remaining"),
                 "confidence": None, "notes": "", "created_at": now,
             })
@@ -2837,6 +2861,30 @@ async def export_exceptions(run_id: Optional[str] = None, current=Depends(get_cu
 
 
 # ----- Audit -----
+@api.get("/notifications")
+async def notifications(limit: int = 20, current=Depends(get_current_user)):
+    """Return the small activity slice needed by the application shell.
+
+    This avoids downloading up to 1,000 audit records and 500 allocation
+    headers on every navigation and polling interval.
+    """
+    limit = max(1, min(limit, 50))
+    logs = await db.audit_logs.find(
+        {"org_id": current["org_id"]}, {"_id": 0}
+    ).sort("created_at", -1).to_list(limit)
+    run_ids = list({item.get("run_id") for item in logs if item.get("run_id")})
+    run_filter: Dict[str, Any] = {"org_id": current["org_id"]}
+    run_filter["$or"] = [{"status": "processing"}]
+    if run_ids:
+        run_filter["$or"].append({"id": {"$in": run_ids}})
+    runs = await db.allocation_runs.find(
+        run_filter,
+        {"_id": 0, "id": 1, "name": 1, "status": 1, "progress": 1,
+         "progress_phase": 1, "created_at": 1},
+    ).sort("created_at", -1).to_list(limit + len(run_ids))
+    return {"logs": logs, "runs": runs}
+
+
 @api.get("/audit")
 async def audit(run_id: Optional[str] = None, current=Depends(get_current_user)):
     q: Dict[str, Any] = {"org_id": current["org_id"]}

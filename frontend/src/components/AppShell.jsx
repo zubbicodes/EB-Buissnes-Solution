@@ -63,10 +63,9 @@ export default function AppShell({ children }) {
     if (!user || isPlatform) return;
     setNotificationLoading(true);
     try {
-      const [{ data: runs }, { data: audit }] = await Promise.all([
-        api.get("/allocations"),
-        api.get("/audit"),
-      ]);
+      const { data } = await api.get("/notifications", { params: { limit: 20 } });
+      const runs = data.runs || [];
+      const audit = { logs: data.logs || [] };
       const runById = Object.fromEntries((runs || []).map((run) => [run.id, run]));
       const actionContent = {
         validate_upload: ["Validation completed", FileCheck2, "/new"],
@@ -135,10 +134,17 @@ export default function AppShell({ children }) {
       return undefined;
     }
     loadNotifications();
-    const timer = setInterval(loadNotifications, 15000);
-    return () => clearInterval(timer);
+    const timer = setInterval(loadNotifications, 30000);
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") loadNotifications();
+    };
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id, user?.role, location.pathname]);
+  }, [user?.id, user?.role]);
 
   useEffect(() => {
     const close = (event) => {

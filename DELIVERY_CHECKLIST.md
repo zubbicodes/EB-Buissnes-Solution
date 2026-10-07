@@ -17,6 +17,8 @@
 - Run backend tests for matching, XLSX parsing, and auth.
 - Upload representative CSV and XLSX bank/invoice files.
 - Confirm FIFO order against dated invoice listings.
+- Confirm all three client-mapping permissions: identification only, FIFO proposal, and FIFO auto-allocation.
+- Confirm reference-variation phrases match inside longer narratives containing changing EREF/UETR data.
 - Confirm reference overpayments show as `overpaid` with visible overpaid amount.
 - Review the Exceptions screen for unmatched, duplicate, underpayment, overpayment, and low-confidence rows.
 - Export allocation, exception, unmatched, and debtor reports and confirm finance validation fields are present.
